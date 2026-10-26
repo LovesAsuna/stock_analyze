@@ -1,0 +1,225 @@
+/* 分时终端仅消费全局 tokens；价格及指标颜色与线型在切换窗格时保持一致。 */
+.intraday-terminal {
+  min-width: 0;
+  color: var(--color-ink);
+  background: var(--color-chart);
+  font-size: var(--text-xs);
+}
+
+.intraday-terminal-readout,
+.intraday-study-controls,
+.intraday-accessible-studies {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs) var(--space-md);
+  padding: var(--space-xs) var(--space-md);
+  color: var(--color-muted);
+}
+
+.intraday-terminal-readout {
+  min-height: 42px;
+  border-bottom: 1px solid var(--color-rule);
+}
+
+.intraday-terminal-readout > strong {
+  color: var(--color-ink);
+  font-weight: 500;
+}
+
+.intraday-study-controls {
+  background: var(--color-paper-2);
+  border-bottom: 1px solid var(--color-rule);
+}
+
+.intraday-study-controls label {
+  display: inline-flex;
+  gap: var(--space-xs);
+  align-items: center;
+  min-height: 36px;
+  color: var(--color-ink);
+  cursor: pointer;
+}
+
+.intraday-study-controls input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  accent-color: var(--color-focus);
+}
+
+.intraday-study-controls small,
+.intraday-pane-legend small {
+  color: var(--color-muted);
+  font-size: 10px;
+}
+
+.intraday-terminal-stage {
+  position: relative;
+  height: 720px;
+  min-width: 0;
+  isolation: isolate;
+}
+
+.intraday-terminal-stage[data-study-count='1'] { height: 600px; }
+.intraday-terminal-stage[data-study-count='0'] { height: 480px; }
+.intraday-terminal .intraday-chart { height: 100%; width: 100%; }
+
+.intraday-pane-legend {
+  position: absolute;
+  left: var(--space-sm);
+  right: 82px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2xs) var(--space-sm);
+  width: fit-content;
+  max-width: calc(100% - 100px);
+  padding: 2px var(--space-2xs);
+  background: var(--color-chart);
+  color: var(--color-muted);
+  font-size: 11px;
+  line-height: 1.5;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.intraday-pane-legend > strong {
+  color: var(--color-ink);
+  font-weight: 500;
+}
+
+.intraday-reading {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  white-space: nowrap;
+  color: var(--color-muted);
+}
+
+.intraday-reading b { color: var(--color-ink); font-weight: 500; }
+.intraday-swatch { width: 14px; height: 0; border-top: 2px solid var(--color-study-1); flex: 0 0 14px; }
+.intraday-swatch.slot-2 { border-color: var(--color-study-2); }
+.intraday-swatch.slot-3 { border-color: var(--color-study-3); }
+.intraday-swatch.slot-4 { border-color: var(--color-study-4); }
+.intraday-swatch.dashed { border-top-style: dashed; }
+.intraday-swatch.dotted { border-top-style: dotted; }
+.intraday-swatch.bar { height: 9px; border: 0; border-left: 4px solid var(--color-chart-up); border-right: 4px solid var(--color-chart-down); }
+
+.intraday-tooltip {
+  position: absolute;
+  top: 40px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-2xs);
+  width: min(255px, calc(100% - 100px));
+  max-height: calc(100% - 60px);
+  overflow: auto;
+  padding: var(--space-sm);
+  border: 1px solid var(--color-rule-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-paper-2);
+  color: var(--color-muted);
+  box-shadow: 0 4px 16px var(--color-overlay);
+  font-size: 11px;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.intraday-tooltip.align-right { right: 82px; }
+.intraday-tooltip.align-left { left: var(--space-sm); }
+.intraday-tooltip > strong { color: var(--color-ink); font-size: 11px; font-weight: 500; }
+.intraday-tooltip > small { font-size: 10px; }
+.intraday-tooltip .intraday-reading { justify-content: space-between; }
+.intraday-tooltip .intraday-reading > span { margin-right: auto; }
+
+/* 周期栏在 Canvas 的直接下方，并且属于全屏宿主；辅助读数及表格放在其后。 */
+.intraday-terminal-footer {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: var(--space-2xs) var(--space-xs);
+  border-block: 1px solid var(--color-rule);
+  background: var(--color-chart);
+}
+
+.intraday-terminal-footer .timeframe-controls { gap: var(--space-2xs); }
+.intraday-terminal-footer .timeframe-tabs { margin: 0; }
+.intraday-keyboard {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-md);
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+}
+
+.intraday-terminal .intraday-keyboard input[type='range'] {
+  flex: 1;
+  min-width: 60px;
+  width: auto;
+  min-height: 28px;
+  padding: 0;
+  accent-color: var(--color-focus);
+}
+
+.intraday-keyboard > span { white-space: nowrap; }
+.intraday-accessible-studies { padding-top: 0; font-size: 11px; }
+.intraday-accessible-studies > strong { font-weight: 500; }
+.intraday-terminal .intraday-table { margin-bottom: var(--space-sm); }
+.intraday-terminal .intraday-table summary { min-height: 32px; cursor: pointer; color: var(--color-muted); }
+.intraday-terminal .intraday-table td { white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.intraday-terminal:fullscreen {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100dvh;
+  overflow: auto;
+  background: var(--color-chart);
+}
+
+.intraday-terminal:fullscreen .intraday-terminal-stage {
+  flex: 1 0 340px;
+  height: auto;
+  min-height: 340px;
+}
+
+.intraday-terminal:fullscreen > :not(.intraday-terminal-stage) { flex-shrink: 0; }
+
+.intraday-terminal .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.intraday-terminal input:focus-visible,
+.intraday-terminal summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+@media (max-width: 40rem) {
+  .intraday-terminal-stage { height: 680px; }
+  .intraday-terminal-stage[data-study-count='1'] { height: 560px; }
+  .intraday-terminal-stage[data-study-count='0'] { height: 440px; }
+  .intraday-pane-legend { gap: 2px var(--space-xs); font-size: 10px; left: var(--space-2xs); }
+  .intraday-pane-legend small { display: none; }
+  .intraday-pane-legend .intraday-swatch { width: 10px; flex-basis: 10px; }
+  .intraday-tooltip { width: min(225px, calc(100% - 94px)); padding: var(--space-xs); }
+  .intraday-keyboard { flex-wrap: wrap; gap: var(--space-xs); }
+  .intraday-terminal-readout { gap: var(--space-2xs) var(--space-xs); }
+}
+
+@media (pointer: coarse) {
+  .intraday-study-controls label,
+  .intraday-terminal .intraday-keyboard input[type='range'],
+  .intraday-terminal .intraday-table summary { min-height: 44px; }
+}
+
+@media (forced-colors: active) {
+  .intraday-swatch { border-color: CanvasText; }
+  .intraday-swatch.bar { border-color: CanvasText; }
+}

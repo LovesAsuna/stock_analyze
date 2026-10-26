@@ -1,0 +1,312 @@
+/* 紧凑炭灰工具栏：沿用现有主题令牌，全部样式限制在 chart-tools 命名空间。 */
+.chart-tools {
+  min-width: 0;
+  color: var(--color-muted);
+  background: var(--color-chart);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+}
+
+.chart-tools-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2xs) var(--space-xs);
+  padding: var(--space-2xs) var(--space-xs);
+  border-block: var(--rule-width) solid var(--color-rule);
+}
+
+.chart-tools-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2xs);
+  min-height: var(--space-xl);
+  padding: var(--space-2xs) var(--space-xs);
+  border: var(--rule-width) solid var(--color-transparent);
+  border-radius: var(--radius-sm);
+  background: var(--color-transparent);
+  color: var(--color-muted);
+  font: inherit;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--dur-micro) var(--ease-out),
+    color var(--dur-micro) var(--ease-out), border-color var(--dur-micro) var(--ease-out);
+}
+
+.chart-tools-button svg,
+.chart-tools-crosshair > svg {
+  flex-shrink: 0;
+}
+
+.chart-tools-button:hover {
+  background: var(--color-paper-3);
+  color: var(--color-ink);
+  border-color: var(--color-rule);
+}
+
+.chart-tools-button[aria-expanded='true'],
+.chart-tools-button[aria-pressed='true'] {
+  background: var(--color-paper-3);
+  border-color: var(--color-rule-2);
+  color: var(--color-accent);
+}
+
+.chart-tools-button:focus-visible,
+.chart-tools-crosshair select:focus-visible,
+.chart-tools-dialog input:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.chart-tools-crosshair {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  min-height: var(--space-xl);
+  padding-left: var(--space-xs);
+  border-left: var(--rule-width) solid var(--color-rule);
+}
+
+.chart-tools-crosshair select {
+  min-height: var(--space-xl);
+  width: auto;
+  max-width: 100%;
+  padding: var(--space-2xs);
+  border: var(--rule-width) solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  background: var(--color-paper-2);
+  color: var(--color-accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.chart-tools-actions,
+.chart-tools-utilities {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding-left: var(--space-xs);
+  border-left: var(--rule-width) solid var(--color-rule);
+}
+
+.chart-tools-utilities {
+  margin-left: auto;
+}
+
+/* 原生 dialog 保留浏览器模态、键盘与焦点行为，外观沿用工作台主题。 */
+.chart-tools-dialog {
+  box-sizing: border-box;
+  position: fixed;
+  inset: 0;
+  width: min(420px, calc(100% - var(--space-lg)));
+  max-height: calc(100dvh - var(--space-lg));
+  margin: auto;
+  padding: 0;
+  overflow: auto;
+  border: var(--rule-width) solid var(--color-rule-2);
+  border-radius: var(--radius-md);
+  background: var(--color-chart);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+}
+
+.chart-tools-dialog::backdrop {
+  background: var(--color-overlay);
+}
+
+.chart-tools-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: var(--rule-width) solid var(--color-rule);
+}
+
+.chart-tools-dialog-header h2 {
+  margin: 0;
+  color: var(--color-ink);
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+}
+
+.chart-tools-dialog-header p {
+  margin: var(--space-2xs) 0 0;
+  color: var(--color-muted);
+}
+
+.chart-tools-close {
+  flex-shrink: 0;
+}
+
+.chart-tools-settings-fields {
+  padding-inline: var(--space-md);
+}
+
+.chart-tools-check {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  min-height: calc(var(--space-xl) + var(--space-md));
+  padding-block: var(--space-sm);
+  border-bottom: var(--rule-width) solid var(--color-rule);
+  cursor: pointer;
+}
+
+.chart-tools-check strong,
+.chart-tools-check small {
+  display: block;
+}
+
+.chart-tools-check strong {
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.chart-tools-check small {
+  margin-top: var(--space-2xs);
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+}
+
+/* 覆盖全局 input:not([type='checkbox'])，避免原生单选框被扩成整行输入框。 */
+.chart-tools-dialog input[type='checkbox'],
+.chart-tools-dialog input[type='radio'] {
+  box-sizing: border-box;
+  flex-shrink: 0;
+  width: var(--space-md);
+  height: var(--space-md);
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.chart-tools-price-scale {
+  min-width: 0;
+  margin: var(--space-md) 0;
+  padding: 0;
+  border: 0;
+}
+
+.chart-tools-price-scale legend {
+  padding: 0;
+  color: var(--color-ink);
+  font-size: var(--text-sm);
+}
+
+.chart-tools-scale-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs) var(--space-sm);
+  margin-top: var(--space-xs);
+}
+
+.chart-tools-scale-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  min-height: var(--space-xl);
+  color: var(--color-muted);
+  cursor: pointer;
+}
+
+.chart-tools-scale-options label:has(input:checked) {
+  color: var(--color-accent);
+}
+
+.chart-tools-price-scale p {
+  margin: var(--space-xs) 0 0;
+  color: var(--color-muted);
+  line-height: 1.6;
+}
+
+.chart-tools-data-note {
+  margin: 0 var(--space-md) var(--space-md);
+  padding: var(--space-sm);
+  border: var(--rule-width) solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  background: var(--color-paper-2);
+  color: var(--color-muted);
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.chart-tools-data-note strong {
+  color: var(--color-ink);
+  font-weight: 500;
+}
+
+.chart-tools-error {
+  margin: 0;
+  padding: var(--space-xs) var(--space-md);
+  color: var(--color-error);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.chart-tools-dialog-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+  border-top: var(--rule-width) solid var(--color-rule);
+  color: var(--color-muted);
+}
+
+.chart-tools-primary {
+  padding-inline: var(--space-md);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-ink);
+}
+
+.chart-tools-primary:hover {
+  background: var(--color-accent);
+  border-color: var(--color-focus);
+  color: var(--color-accent-ink);
+}
+
+@media (max-width: 40rem) {
+  .chart-tools-bar {
+    gap: var(--space-2xs);
+  }
+
+  .chart-tools-actions {
+    order: 1;
+    flex-basis: 100%;
+    justify-content: space-between;
+    padding: var(--space-2xs) 0 0;
+    border-left: 0;
+    border-top: var(--rule-width) solid var(--color-rule);
+  }
+
+  .chart-tools-utilities {
+    padding-left: 0;
+    border-left: 0;
+  }
+}
+
+@media (pointer: coarse) {
+  .chart-tools-button,
+  .chart-tools-crosshair,
+  .chart-tools-crosshair select,
+  .chart-tools-scale-options label {
+    min-height: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chart-tools-button {
+    transition: none;
+  }
+}

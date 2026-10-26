@@ -1,0 +1,37 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+.vite/
+*.tsbuildinfo
+
+# Local secrets
+.env
+.env.*
+!.env.example
+credentials*
+*.pem
+*.key
+
+# Test output and local research artifacts
+playwright-report/
+test-results/
+blob-report/
+screenshots/
+/longbridge-chart-toolbar.png
+/artifacts/*
+!/artifacts/longbridge-runtime-20261021-c/
+/artifacts/longbridge-runtime-20261021-c/*
+!/artifacts/longbridge-runtime-20261021-c/entry-inline.js
+!/artifacts/longbridge-runtime-20261021-c/script-0-lbquotemodule_runtime_99fefd.js
+!/artifacts/longbridge-runtime-20261021-c/lbquotemodule_runtime_99fefd.wasm
+!/artifacts/longbridge-runtime-20261021-c/manifest.json
+
+# Local tooling, logs and operating system files
+.ccg/
+.hallmark/
+.claude/
+.idea/
+*.log
+.DS_Store
+Thumbs.db

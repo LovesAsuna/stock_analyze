@@ -1,0 +1,59 @@
+/* 事件入口分别属于全局顶栏和当前证券工具栏，沿用现有 React/Tailwind 工作台主题。 */
+.event-entry { display: inline-flex; align-items: center; justify-content: center; gap: 7px; flex-shrink: 0; min-height: 36px; padding: 7px 11px; border: 1px solid var(--color-rule-2); border-radius: var(--radius-sm); background: var(--color-paper-2); color: var(--color-ink); font-family: var(--font-body); font-size: 12px; line-height: 1.4; white-space: nowrap; cursor: pointer; }
+.event-entry-global { color: var(--color-accent); border-color: var(--color-brand-solid); background: var(--color-brand-soft); }
+.event-entry-security { color: var(--color-muted); }
+.event-entry:hover, .event-entry[aria-expanded='true'] { color: var(--color-accent); border-color: var(--color-accent); }
+.event-center-dialog { position: fixed; inset: 0 0 0 auto; box-sizing: border-box; width: min(600px, 100%); max-width: 100%; height: 100dvh; max-height: 100dvh; margin: 0; padding: 0; border: 0; border-left: 1px solid var(--color-rule-2); border-radius: 0; overflow: auto; background: var(--color-chart); color: var(--color-ink); font-family: var(--font-body); }
+/* 模态期间锁定页面并预留原滚动槽，避免双滚动条及背景横向跳动。 */
+html:has(.event-center-dialog[open]) { overflow: hidden; scrollbar-gutter: stable; }
+.event-center-dialog[open] { display: flex; flex-direction: column; overflow: clip; }
+.event-center-dialog::backdrop { background: var(--color-overlay); }
+.event-center-header { flex-shrink: 0; position: relative; z-index: var(--z-base); display: flex; justify-content: space-between; align-items: start; gap: 16px; padding: 24px; border-bottom: 1px solid var(--color-rule); background: var(--color-chart); }
+.event-center-header > div { min-width: 0; }
+.event-center-header > div > span { font-size: 11px; color: var(--color-accent); }
+.event-center-header h2 { display: flex; align-items: center; gap: 10px; margin-block: 7px; font-size: 23px; }
+.event-center-header p { margin: 0; color: var(--color-muted); font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.event-center-header .icon-button { flex-shrink: 0; }
+.event-center-content { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--color-rule-2) var(--color-chart); padding: 0 24px 28px; font-size: 12px; }
+.event-center-content:hover, .event-center-content:focus-within { scrollbar-color: var(--color-muted) var(--color-chart); }
+.event-center-toolbar { position: sticky; top: 0; z-index: var(--z-raised); padding-block: 20px 12px; background: var(--color-chart); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.event-center-toolbar > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.event-center-toolbar button:not(.icon-button) { min-height: 36px; padding: 6px 12px; border: 1px solid var(--color-rule); border-radius: var(--radius-sm); background: var(--color-paper-2); color: var(--color-muted); font: inherit; cursor: pointer; }
+.event-center-toolbar button[aria-pressed='true'] { color: var(--color-accent); border-color: var(--color-brand-solid); background: var(--color-brand-soft); }
+.event-center-window, .event-center-note { margin: 16px 0; color: var(--color-muted); font-size: 11px; line-height: 1.9; }
+.event-center-warnings { margin-block: 16px; padding: 0 12px; border: 1px solid var(--color-rule); border-radius: var(--radius-md); background: var(--color-paper-2); }
+.event-center-warnings summary { padding: 10px 0; min-height: 40px; color: var(--color-muted); font-size: 11px; }
+.event-center-warnings ul { padding-left: 16px; margin: 0 0 12px; color: var(--color-muted); font-size: 11px; line-height: 1.8; }
+.event-center-warnings li + li { margin-top: 5px; }
+.market-event-group { margin-top: 24px; }
+.market-event-group > h3 { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 14px; }
+.market-event-group > h3 > span { color: var(--color-muted); font-size: 11px; font-weight: 400; }
+.market-event-card { margin-top: 12px; padding: 16px; border: 1px solid var(--color-rule); border-radius: var(--radius-md); background: var(--color-paper-2); }
+.market-event-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--color-muted); font-size: 11px; }
+.market-event-kind { display: inline-flex; padding: 2px 7px; border: 1px solid var(--color-rule-2); border-radius: var(--radius-sm); color: var(--color-ink); }
+.market-event-kind.kind-macro, .market-event-kind.kind-earnings { color: var(--color-accent); border-color: var(--color-brand-solid); background: var(--color-brand-soft); }
+.market-event-card h3 { margin: 12px 0 8px; font-size: 14px; line-height: 1.8; font-weight: 500; overflow-wrap: anywhere; }
+/* 覆盖全局链接的 nowrap，长新闻标题及连续英文在卡片内完整换行。 */
+.market-event-card h3 a { color: var(--color-ink); text-decoration: none; white-space: normal; overflow-wrap: anywhere; }
+.market-event-card h3 a:hover { color: var(--color-accent); text-decoration: underline; text-underline-offset: 3px; }
+.market-event-card h3 svg { display: inline; margin-left: 6px; vertical-align: middle; }
+.market-event-time { margin: 0; color: var(--color-muted); font-size: 11px; line-height: 1.8; }
+.market-event-summary { margin: 12px 0 0; color: var(--color-muted); font-size: 12px; line-height: 1.9; overflow-wrap: anywhere; white-space: pre-line; }
+.market-event-no-link { display: block; margin-top: 10px; color: var(--color-muted); font-size: 10px; }
+.event-center-empty { display: grid; justify-items: center; gap: 12px; padding: 48px 12px; color: var(--color-muted); text-align: center; }
+.event-center-empty p { color: var(--color-ink); margin: 0; }
+.event-center-empty span { max-width: 32ch; font-size: 12px; line-height: 1.8; }
+.event-center-state { padding-block: 24px; color: var(--color-muted); line-height: 1.8; }
+.event-center-state .button { margin-top: 12px; }
+@media (max-width: 39.99rem) {
+  .event-entry { min-height: 44px; padding-inline: 8px; font-size: 11px; }
+  .event-center-dialog .icon-button { min-width: 44px; min-height: 44px; }
+  .topbar .event-entry-global { gap: 4px; }
+  .topbar .event-entry-global svg { display: none; }
+  .event-center-header { padding: 18px 16px; }
+  .event-center-header h2 { font-size: 21px; }
+  .event-center-content { padding: 0 14px 24px; }
+  .event-center-toolbar { padding-top: 16px; }
+  .event-center-toolbar button:not(.icon-button) { min-height: 44px; }
+  .market-event-card { padding: 14px; }
+}

@@ -1,0 +1,217 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { createRequire } from 'node:module';
+import { createNativeFeed } from '../server/native-feed.js';
+import type { MarketStreamEvent } from '../shared/realtime.js';
+
+const require = createRequire(import.meta.url);
+const { normalizeNativeSymbol, resolveCounter } = require('../server/native/helpers.cjs');
+const { normalizeNativeQuote } = require('../server/native/quote.cjs');
+const { NativeQuoteWorker } = require('../server/native/worker.cjs');
+
+/** 等待纯内存异步任务完成。参数：无；返回：下一个事件循环Promise。 */
+async function flush(): Promise<void> { await new Promise<void>((resolve) => setImmediate(resolve)); }
+
+/** 创建可控Promise。参数：无；返回：Promise与完成函数。 */
+function deferred() {
+  let resolve!: (value: unknown) => void;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+/** 创建不加载原生模块的行情假引擎。参数：无；返回：原生方法替身及记录。 */
+function mockNative() {
+  const callbacks: ((event: string, data: unknown) => void)[] = [];
+  const subscriptions: unknown[] = []; const unsubscriptions: unknown[] = []; const searchParameters: any[] = [];
+  const searchJobs: ReturnType<typeof deferred>[] = []; const snapshotJobs: ReturnType<typeof deferred>[] = [];
+  return {
+    callbacks, subscriptions, unsubscriptions, searchJobs, snapshotJobs, searchParameters,
+    wsClient: (_binary: string, _text: string, callback: (event: string, data: unknown) => void) => { callbacks.push(callback); return {}; },
+    wsClose: () => {},
+    searchSecurities: (raw: string) => { searchParameters.push(JSON.parse(raw)); const job = deferred(); searchJobs.push(job); return job.promise; },
+    wsSubscribeV2: (raw: string) => subscriptions.push(JSON.parse(raw)),
+    wsUnsubscribeV2: (raw: string) => unsubscriptions.push(JSON.parse(raw)),
+    quoteDetail: () => { const job = deferred(); snapshotJobs.push(job); return job.promise; },
+  };
+}
+
+/** 返回精确证券结果。参数：代码、市场、前缀；返回：原生搜索响应。 */
+function security(code = 'QQQ', market = 'US', prefix = 'ETF') {
+  return { data: [{ code, market, counter_id: `${prefix}/${market}/${code}` }] };
+}
+
+/** 返回确定时间的原生报价。参数：timestamp秒、price价格；返回：原生data。 */
+function rawQuote(timestamp = 100, price = '100') {
+  return { counter_id: 'ETF/US/QQQ', timestamp: String(timestamp), last_done: price, prev_close: '90', trade_status: 202 };
+}
+
+test('证券边界支持US/HK及期权，搜索必须验证code、market及counter_id', () => {
+  assert.equal(normalizeNativeSymbol('00700.hk'), '700.HK');
+  assert.equal(normalizeNativeSymbol('AAPL261218C00200000.US'), 'AAPL261218C00200000.US');
+  assert.throws(() => normalizeNativeSymbol('A'.repeat(33) + '.US'), /35/);
+  for (const symbol of ['0.HK', 'AAPL.SH', 'QQQ.US;exit', '../QQQ.US']) assert.throws(() => normalizeNativeSymbol(symbol));
+  assert.equal(resolveCounter(security(), 'QQQ.US'), 'ETF/US/QQQ');
+  assert.equal(resolveCounter(security('00700', 'HK', 'ST'), '700.HK'), 'ST/HK/00700');
+  assert.throws(() => resolveCounter(security('SQQQ'), 'QQQ.US'), /未找到/);
+  assert.throws(() => resolveCounter({ data: [{ code: 'QQQ', market: 'US', counter_id: 'ETF/HK/QQQ' }] }, 'QQQ.US'), /未找到/);
+  assert.throws(() => resolveCounter({ data: [...security().data, ...security('QQQ', 'US', 'ST').data] }, 'QQQ.US'), /多个/);
+});
+
+test('原生增量拒旧时间，保留昨收并按已确认交易状态选择价格', () => {
+  const initial = normalizeNativeQuote(rawQuote(), 'QQQ.US');
+  assert.equal(initial.quote.session, 'regular');
+  const next = normalizeNativeQuote({ timestamp: '101', last_done: '102' }, 'QQQ.US', initial);
+  assert.equal(next.quote.previousClose, 90);
+  assert.equal(normalizeNativeQuote({ ...rawQuote(99), prev_close: '1' }, 'QQQ.US', next), null);
+  const pre = normalizeNativeQuote({ timestamp: '102', sequence: '1', market_price: '103', trade_status: '206' }, 'QQQ.US', next);
+  assert.equal(pre.quote.price, 103); assert.equal(pre.quote.session, 'pre');
+  const post = normalizeNativeQuote({ timestamp: '103', sequence: '2', market_price: '104', trade_status: 207 }, 'QQQ.US', pre);
+  assert.equal(post.quote.session, 'post');
+  assert.equal(normalizeNativeQuote({ ...rawQuote(104), trade_status: 999 }, 'QQQ.US', post).quote.session, 'unknown');
+  assert.equal(normalizeNativeQuote({ ...rawQuote(105), timestamp: true }, 'QQQ.US', post), null);
+  assert.equal(normalizeNativeQuote({ timestamp: '106', trade_status: 206, last_done: '1' }, 'QQQ.US'), null);
+});
+
+test('原生重连恢复所有目标，过期搜索及快照不能覆盖新一代订阅', async () => {
+  const native = mockNative(); const events: { event: string; data: any }[] = [];
+  const worker = new NativeQuoteWorker(native, (event: string, data: unknown) => events.push({ event, data }));
+  try {
+    worker.subscribe('QQQ.US'); worker.subscribe('700.HK'); worker.connect();
+    const callback = native.callbacks[0];
+    callback('message', { type: 'authenticated' });
+    assert.equal(native.searchJobs.length, 2);
+    assert.deepEqual(native.searchParameters[0], { term: 'QQQ', markets: ['US'], is_code_exact_match: true, products: [], limit: 100 });
+    assert.deepEqual(native.searchParameters[1].markets, ['HK']);
+    callback('reconnecting', {}); callback('message', { type: 'authenticated' });
+    native.searchJobs[0].resolve(security()); native.searchJobs[1].resolve(security('700', 'HK', 'ST'));
+    await flush(); assert.equal(native.subscriptions.length, 0);
+    native.searchJobs[2].resolve(security()); native.searchJobs[3].resolve(security('700', 'HK', 'ST'));
+    await flush(); assert.equal(native.subscriptions.length, 2);
+    assert.equal(events.some((item) => item.data.state === 'connected'), false);
+    callback('message', { type: 'quote/detail', counter_id: 'ETF/US/QQQ', data: { ...rawQuote(110, '110'), prev_close: undefined } });
+    native.snapshotJobs[0].resolve({ code: 0, data: rawQuote(100, '100') });
+    native.snapshotJobs[1].resolve({ code: 0, data: { ...rawQuote(), counter_id: 'ST/HK/700' } });
+    await flush();
+    const qqq = events.filter((item) => item.event === 'quote' && item.data.symbol === 'QQQ.US');
+    assert.equal(qqq.at(-1)?.data.price, 110); assert.equal(qqq.at(-1)?.data.previousClose, 90);
+    assert.equal(events.filter((item) => item.data.state === 'connected').length, 2);
+    worker.unsubscribe('QQQ.US');
+    callback('message', { type: 'quote/detail', counter_id: 'ETF/US/QQQ', data: rawQuote(120) });
+    assert.equal(events.filter((item) => item.event === 'quote' && item.data.symbol === 'QQQ.US').length, qqq.length);
+  } finally { worker.close(); }
+});
+
+test('精确匹配失败以错误事件报告，不猜测counter前缀', async () => {
+  const native = mockNative(); const events: any[] = [];
+  const worker = new NativeQuoteWorker(native, (_event: string, data: unknown) => events.push(data));
+  try {
+    worker.subscribe('QQQ.US'); worker.connect(); native.callbacks[0]('message', { type: 'authenticated' });
+    native.searchJobs[0].resolve(security('SQQQ')); await flush();
+    assert.equal(native.subscriptions.length, 0);
+    assert.match(events.at(-1).message, /未找到/); assert.equal(events.at(-1).state, 'error');
+  } finally { worker.close(); }
+});
+
+test('证券搜索超时发出明确错误，迟到搜索不能创建订阅', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const native = mockNative(); const events: any[] = [];
+  const worker = new NativeQuoteWorker(native, (_event: string, data: unknown) => events.push(data));
+  try {
+    worker.subscribe('QQQ.US'); worker.connect(); native.callbacks[0]('message', { type: 'authenticated' });
+    context.mock.timers.tick(12000); await flush();
+    assert.equal(events.at(-1).state, 'error'); assert.match(events.at(-1).message, /超时/);
+    native.searchJobs[0].resolve(security()); await flush(); assert.equal(native.subscriptions.length, 0);
+  } finally { worker.close(); context.mock.timers.reset(); }
+});
+
+test('取消目标和重连后，旧快照不能确认新目标或覆盖价格', async () => {
+  const native = mockNative(); const events: any[] = [];
+  const worker = new NativeQuoteWorker(native, (event: string, data: unknown) => events.push({ event, data }));
+  try {
+    worker.subscribe('QQQ.US'); worker.connect(); native.callbacks[0]('message', { type: 'authenticated' });
+    native.searchJobs[0].resolve(security()); await flush();
+    worker.unsubscribe('QQQ.US'); worker.subscribe('QQQ.US');
+    native.snapshotJobs[0].resolve({ code: 0, data: rawQuote(500, '500') });
+    native.searchJobs[1].resolve(security()); await flush();
+    assert.equal(events.some((item) => item.event === 'quote'), false);
+    native.callbacks[0]('reconnecting', {}); native.callbacks[0]('message', { type: 'authenticated' });
+    native.snapshotJobs[1].resolve({ code: 0, data: rawQuote(600, '600') });
+    native.searchJobs[2].resolve(security()); await flush();
+    assert.equal(events.some((item) => item.event === 'quote'), false);
+    native.snapshotJobs[2].resolve({ code: 0, data: rawQuote(100, '100') }); await flush();
+    assert.equal(events.filter((item) => item.event === 'quote').at(-1).data.price, 100);
+  } finally { worker.close(); }
+});
+
+test('同步取消尚未启动的订阅不会为了unsubscribe启动原生进程', async () => {
+  class FakeEngine extends EventEmitter {
+    calls: string[] = [];
+    /** 记录操作。参数：method方法；返回：Promise<void>。 */
+    async call(method: string) { this.calls.push(method); }
+    /** 无进程清理。参数：无；返回：Promise<void>。 */
+    async stop() {}
+  }
+  const engine = new FakeEngine(); const cancel = createNativeFeed(engine)('QQQ.US', () => {});
+  cancel(); await flush(); assert.deepEqual(engine.calls, []);
+});
+
+test('快速取消再订阅同证券仍按队列重建目标并恢复确认事件', async () => {
+  class FakeEngine extends EventEmitter {
+    calls: string[] = [];
+    /** 记录变更并模拟确认。参数：method操作、payload代码；返回：Promise<void>。 */
+    async call(method: string, payload?: { symbol: string }) {
+      this.calls.push(`${method}:${payload?.symbol ?? ''}`);
+      if (method === 'subscribe') this.emit('status', { symbol: payload?.symbol, state: 'connected', message: '桌面原生WS匿名' });
+    }
+    /** 停止假进程。参数：无；返回：Promise<void>。 */
+    async stop() {}
+  }
+  const engine = new FakeEngine(); const subscribe = createNativeFeed(engine);
+  const first = subscribe('QQQ.US', () => {}); await flush();
+  first(); const events: MarketStreamEvent[] = [];
+  const second = subscribe('QQQ.US', (event) => events.push(event)); await flush();
+  assert.deepEqual(engine.calls, ['subscribe:QQQ.US', 'connect:', 'unsubscribe:QQQ.US', 'subscribe:QQQ.US', 'connect:']);
+  assert.equal(events.some((event) => event.type === 'status' && event.state === 'connected'), true);
+  second(); await flush();
+});
+
+test('进程失败按有界退避重放目标，取消后不再恢复', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  class FakeEngine extends EventEmitter {
+    calls: string[] = []; stops = 0;
+    /** 记录IPC。参数：method操作；返回：Promise<void>。 */
+    async call(method: string) { this.calls.push(method); }
+    /** 记录回收。参数：无；返回：Promise<void>。 */
+    async stop() { this.stops += 1; }
+  }
+  const engine = new FakeEngine(); const cancel = createNativeFeed(engine)('QQQ.US', () => {}); await flush();
+  for (const delay of [4000, 8000, 16000]) {
+    engine.emit('state', {}); context.mock.timers.tick(delay); await flush();
+  }
+  assert.equal(engine.stops, 3);
+  engine.emit('state', {}); context.mock.timers.tick(32000); await flush(); assert.equal(engine.stops, 3);
+  cancel(); await flush();
+  context.mock.timers.tick(100000); await flush(); assert.equal(engine.stops, 4);
+  context.mock.timers.reset();
+});
+
+test('多个消费者共享一次订阅，相同回调也有独立引用，最后取消销毁进程', async () => {
+  class FakeEngine extends EventEmitter {
+    calls: string[] = []; stops = 0;
+    /** 记录IPC。参数：method操作、payload参数；返回：成功Promise。 */
+    async call(method: string, payload?: { symbol: string }) { this.calls.push(`${method}:${payload?.symbol ?? ''}`); }
+    /** 记录停止。参数：无；返回：成功Promise。 */
+    async stop() { this.stops += 1; }
+  }
+  const engine = new FakeEngine(); const subscribe = createNativeFeed(engine); const events: MarketStreamEvent[] = [];
+  const callback = (event: MarketStreamEvent) => events.push(event);
+  const first = subscribe('QQQ.US', callback); const second = subscribe('QQQ.US', callback);
+  await flush(); assert.deepEqual(engine.calls, ['subscribe:QQQ.US', 'connect:']);
+  engine.emit('status', { symbol: 'QQQ.US', state: 'connected', message: '桌面原生WS匿名' });
+  engine.emit('quote', { symbol: 'QQQ.US', timestamp: 100, price: 100, previousClose: 90, session: 'regular' });
+  engine.emit('quote', { symbol: 'QQQ.US', timestamp: 99, price: 1, previousClose: 1, session: 'regular' });
+  assert.equal(events.filter((event) => event.type === 'quote').length, 2);
+  first(); first(); await flush(); assert.equal(engine.stops, 0);
+  second(); await flush(); assert.equal(engine.calls.at(-1), 'unsubscribe:QQQ.US'); assert.equal(engine.stops, 1);
+});

@@ -1,0 +1,4 @@
+[test]
+# 领域单元测试由 Bun 执行；浏览器测试保留 Playwright 独立入口。
+root = "tests"
+pathIgnorePatterns = ["**/browser/**"]

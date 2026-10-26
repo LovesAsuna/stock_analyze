@@ -1,0 +1,30 @@
+{
+  "capturedAt": "2026-10-21T12:56:38.192Z",
+  "entry": "https://assets.lbctrl.com/web/release-longbridge-trade/lbcharts2/lbquotemodule_runtime_dark_99fefd.html",
+  "records": [
+    {
+      "url": "https://assets.lbctrl.com/web/release-longbridge-trade/lbcharts2/lbquotemodule_runtime_dark_99fefd.html",
+      "file": "entry.html",
+      "bytes": 16873,
+      "sha256": "786a59142df803a470f3861c07993d443669b163549db1ef75f85aa7b4bd08ca"
+    },
+    {
+      "url": "https://assets.lbctrl.com/web/release-longbridge-trade/lbcharts2/lbquotemodule_runtime_dark_99fefd.html",
+      "file": "entry-inline.js",
+      "bytes": 16006,
+      "sha256": "0906c50ac299a1dca5233ca6096e0cc15f040da8ac7d1c436d6e36ae75bce200"
+    },
+    {
+      "url": "https://assets.lbctrl.com/web/release-longbridge-trade/lbcharts2/lbquotemodule_runtime_99fefd.js",
+      "file": "script-0-lbquotemodule_runtime_99fefd.js",
+      "bytes": 284944,
+      "sha256": "fe1f876da2d1e38041ed05ee87a995158f0054df0da7a326f70c8aa4fb35c182"
+    },
+    {
+      "url": "https://assets.lbctrl.com/web/release-longbridge-trade/lbcharts2/lbquotemodule_runtime_99fefd.wasm",
+      "file": "lbquotemodule_runtime_99fefd.wasm",
+      "bytes": 10224916,
+      "sha256": "784b9c66459939098bcde055fffeed624220e87f62cc06f311beeab2f8c07a7b"
+    }
+  ]
+}

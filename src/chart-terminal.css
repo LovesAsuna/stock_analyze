@@ -1,0 +1,51 @@
+/* Hallmark · pre-emit critique: P4 H4 E4 S5 R5 V4 · 图表局部复刻，保留工作台结构。 */
+.chart-terminal { min-width: 0; background: var(--color-chart); }
+.analysis-panel:fullscreen { width: 100%; height: 100dvh; overflow: auto; border: none; border-radius: 0; background: var(--color-chart); }
+.analysis-panel:fullscreen .stock-chart, .analysis-panel:fullscreen .intraday-chart { height: max(400px, calc(100dvh - 360px)); }
+.chart-terminal:fullscreen { display: flex; flex-direction: column; width: 100%; height: 100dvh; overflow: auto; background: var(--color-chart); }
+.chart-terminal:fullscreen .chart-frame { flex: 1; min-height: 320px; }
+.chart-terminal:fullscreen .stock-chart { height: 100%; min-height: 320px; }
+.chart-terminal .stock-chart { height: 580px; }
+/* 将图表内部的高层级拖动控件限制在绘图区内，避免覆盖底部上拉菜单。 */
+.chart-terminal .chart-frame { position: relative; container-type: inline-size; isolation: isolate; }
+.chart-terminal .terminal-ohlc { padding: 0; min-height: 0; }
+@container (max-width: 440px) {
+  .terminal-ohlc, .terminal-indicators { display: none; }
+  .terminal-readouts { right: 62px; }
+  .chart-quote-card { top: 84px; }
+}
+.terminal-readouts { position: absolute; inset: 8px 72px auto 12px; z-index: var(--z-raised); pointer-events: none; color: var(--color-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.terminal-price-readout, .terminal-averages, .terminal-indicators { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.terminal-price-readout strong { color: var(--color-ink); font-weight: 500; }
+.terminal-averages { margin-top: 5px; }
+.terminal-averages span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.terminal-indicators { margin-top: 4px; font-size: 10px; }
+.study-key { display: inline-block; width: 14px; height: 0; border-top: 2px solid var(--color-study-1); }
+.study-key-2 { border-color: var(--color-study-2); border-top-style: dashed; }
+.study-key-3 { border-color: var(--color-study-3); border-top-style: dotted; }
+.study-key-4 { border-color: var(--color-study-4); border-top-style: dashed; }
+.terminal-ohlc { position: absolute; left: 12px; top: 82px; right: 72px; z-index: var(--z-raised); pointer-events: none; font-size: 10px; color: var(--color-muted); }
+.terminal-ohlc dl { display: flex; flex-wrap: wrap; gap: 3px 12px; margin: 0; }
+.terminal-ohlc dl div { display: flex; gap: 4px; }
+.terminal-ohlc dd { margin: 0; color: var(--color-ink); }
+.chart-quote-card { position: absolute; z-index: var(--z-raised); top: 84px; left: 12px; width: min(240px, calc(100% - 84px)); background: var(--color-chart); border: 1px solid var(--color-rule-2); padding: 10px 12px; pointer-events: none; font-size: 11px; color: var(--color-muted); }
+.chart-quote-card strong { font-size: 10px; font-weight: 500; color: var(--color-ink); }
+.chart-quote-card dl { margin: 8px 0 0; }
+.chart-quote-card dl div { display: flex; justify-content: space-between; gap: 8px; line-height: 1.9; }
+.chart-quote-card dd { margin: 0; color: var(--color-ink); font-variant-numeric: tabular-nums; }
+.terminal-pane-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--color-muted); font-size: 10px; padding: 6px 12px; border-top: 1px solid var(--color-chart-grid); }
+.terminal-pane-legend span:last-child { margin-left: auto; }
+.study-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; padding: 6px 12px; font-size: 11px; color: var(--color-muted); border-bottom: 1px solid var(--color-rule); }
+.study-controls > label { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; }
+.study-controls .layer-controls { padding: 0; flex: 1; }
+.study-controls .layer-controls > label { min-height: 32px; }
+.chart-toolbar > .chart-context { margin-right: auto; color: var(--color-muted); font-size: var(--text-xs); padding-left: var(--space-xs); }
+@media (max-width: 40rem) {
+  .chart-terminal .stock-chart { height: 620px; }
+  .terminal-readouts { right: 60px; font-size: 10px; }
+  .terminal-price-readout { gap: 3px 8px; }
+  .terminal-averages { gap: 3px 8px; }
+  .terminal-indicators { display: none; }
+  .terminal-ohlc { top: 100px; right: 60px; }
+  .chart-quote-card { top: 110px; }
+}
