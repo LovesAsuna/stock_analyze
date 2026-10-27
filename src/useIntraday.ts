@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { IntradayData, IntradaySession } from '../shared/intraday';
 import type { SourceMode } from '../shared/types';
+import { parseStreamEvent, type SyncEvent } from '../shared/realtime';
+import { mergeIntradayUpdate, parseIntradayUpdate } from '../shared/intraday-updates';
 
 /** 校验分时数据边界，拒绝错证券、错时段和无效点。参数：未知JSON与请求上下文；返回：合法分时数据。 */
 function validate(value: unknown, source: SourceMode, symbol: string, session: IntradaySession, days: 1 | 5): IntradayData {
@@ -20,10 +22,12 @@ function validate(value: unknown, source: SourceMode, symbol: string, session: I
 }
 
 /** 串行刷新真实分时快照；切换条件即隔离旧响应。参数：来源、证券、时段、天数和启用开关；返回：快照与可见错误。 */
-export function useIntraday(source: SourceMode, symbol: string, session: IntradaySession, days: 1 | 5, enabled: boolean) {
+export function useIntraday(source: SourceMode, symbol: string, session: IntradaySession, days: 1 | 5, enabled: boolean, refreshKey = 0) {
   const key = `${source}:${symbol}:${session}:${days}`;
   const [state, setState] = useState<{ key: string; data: IntradayData | null; error: string; loading: boolean } | null>(null);
   const [revision, setRevision] = useState(0);
+  const [syncState, setSyncState] = useState<{ key: string; sync: SyncEvent } | null>(null);
+  const latestUpdate = useRef<{ key: string; points: IntradayData['points']; receivedAt: string } | null>(null);
   useEffect(() => {
     if (!enabled) return;
     const controller = new AbortController(); let timer: ReturnType<typeof setTimeout>;
@@ -35,15 +39,49 @@ export function useIntraday(source: SourceMode, symbol: string, session: Intrada
         const body = await response.json();
         if (!response.ok) throw new Error(body.error ?? `分时读取失败（HTTP ${response.status}）。`);
         const data = validate(body, source, symbol, session, days);
-        if (!controller.signal.aborted) setState({ key, data, error: '', loading: false });
+        if (!controller.signal.aborted) {
+          const update = latestUpdate.current;
+          if (update?.key === key && Date.parse(update.receivedAt) >= Date.parse(data.fetchedAt)) {
+            data.points = mergeIntradayUpdate(data.points, update.points, symbol, days); data.fetchedAt = update.receivedAt;
+          }
+          setState({ key, data, error: '', loading: false });
+        }
       } catch (failure) {
         if (!controller.signal.aborted) setState(previous => ({ key, data: previous?.key === key ? previous.data : null, loading: false, error: failure instanceof Error ? failure.message : '分时读取失败。' }));
       } finally {
-        if (!controller.signal.aborted && source === 'longbridge') timer = setTimeout(load, 15_000);
+        // 长历史仅作低频校正；当前交易日由独立推送触发更新。
+        if (!controller.signal.aborted && source === 'longbridge') timer = setTimeout(load, 60_000);
       }
     }
     void load();
     return () => { controller.abort(); clearTimeout(timer); };
-  }, [source, symbol, session, days, enabled, key, revision]);
-  return { data: enabled && state?.key === key ? state.data : null, error: enabled && state?.key === key ? state.error : '', loading: enabled && (state?.key !== key || state.loading), refresh: () => setRevision(value => value + 1) };
+  }, [source, symbol, session, days, enabled, key, revision, refreshKey]);
+  useEffect(() => {
+    if (!enabled || source !== 'longbridge') return;
+    let disposed = false;
+    const events = new EventSource(`/api/intraday-stream?${new URLSearchParams({ source, symbol, session })}`);
+    const pending = { points: [] as IntradayData['points'], receivedAt: '' };
+    events.onmessage = message => {
+      if (disposed) return;
+      try {
+        const value = JSON.parse(message.data);
+        if (value.type === 'sync') {
+          const event = parseStreamEvent(value);
+          if (event.type === 'sync' && event.symbol === symbol && event.channel === 'intraday') setSyncState({ key, sync: event });
+          return;
+        }
+        const update = parseIntradayUpdate(value, symbol, session);
+        if (pending.receivedAt && Date.parse(update.receivedAt) < Date.parse(pending.receivedAt)) return;
+        pending.points = update.points; pending.receivedAt = update.receivedAt;
+        latestUpdate.current = { key, ...update };
+        setState(previous => previous?.key === key && previous.data ? { ...previous, data: { ...previous.data,
+          points: mergeIntradayUpdate(previous.data.points, update.points, symbol, days), fetchedAt: update.receivedAt } } : previous);
+      } catch { setSyncState(previous => previous?.key === key ? { key, sync: { ...previous.sync, state: 'error' } } : null); }
+    };
+    events.onerror = () => {
+      if (!disposed) setSyncState(previous => previous?.key === key ? { key, sync: { ...previous.sync, state: 'reconnecting' } } : null);
+    };
+    return () => { disposed = true; events.close(); };
+  }, [enabled, source, symbol, session, days, key, revision]);
+  return { data: enabled && state?.key === key ? state.data : null, error: enabled && state?.key === key ? state.error : '', loading: enabled && (state?.key !== key || state.loading), sync: enabled && syncState?.key === key ? syncState.sync : undefined, refresh: () => setRevision(value => value + 1) };
 }

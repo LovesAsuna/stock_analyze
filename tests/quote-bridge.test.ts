@@ -367,6 +367,76 @@ test('K线轮询在途不重叠，后续 count5，单次失败警告后自动恢
   } finally { bridge.close(); context.mock.timers.reset(); }
 });
 
+/** 期权权限/合约拒绝只重试该合约，不重建健康股票共用的进程。 */
+test('期权订阅被拒绝不影响股票，自动重试后可恢复', async (context) => {
+  context.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse(TIME) });
+  const process = new FakeProcess();
+  autoReply(process);
+  const original = process.handler!;
+  const option = 'RKLB261218C100000.US';
+  let denied = true;
+  let spawned = 0;
+  process.handler = (request) => {
+    if (request.method === 'quote.subscribe' && (request.params.symbols as string[])[0] === option && denied) process.reject(request);
+    else original(request);
+  };
+  const bridge = new QuoteBridge({ processFactory: () => { spawned += 1; return process.asProcess(); } });
+  const stockEvents: MarketStreamEvent[] = [];
+  const optionEvents: MarketStreamEvent[] = [];
+  try {
+    bridge.subscribe(SYMBOL, 'day', event => stockEvents.push(event));
+    await flush();
+    const releaseOption = bridge.subscribe(option, 'day', event => optionEvents.push(event));
+    await flush();
+    assert.equal(process.killed, false);
+    assert.equal(spawned, 1);
+    assert.ok(optionEvents.some(event => event.type === 'status' && event.state === 'error' && /证券订阅/.test(event.message)));
+    assert.equal(stockEvents.some(event => event.type === 'status' && event.state === 'reconnecting'), false);
+    process.notify({ symbol: SYMBOL, timestamp: '2026-10-19T14:31:00Z', last_done: '12', trade_session: 0 });
+    assert.equal(quotes(stockEvents).at(-1)?.price, 12);
+    denied = false;
+    context.mock.timers.tick(5000);
+    await flush();
+    assert.equal(spawned, 1);
+    assert.ok(optionEvents.some(event => event.type === 'status' && event.state === 'connected'));
+    assert.equal(quotes(optionEvents).at(-1)?.symbol, option);
+    releaseOption();
+    await flush();
+    assert.equal(process.killed, false);
+  } finally { bridge.close(); context.mock.timers.reset(); }
+});
+
+/** 仅一只合约的请求超时不等同于整个JSONL传输断开。 */
+test('期权订阅超时保留股票连接并可取消失败目标', async (context) => {
+  context.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse(TIME) });
+  const process = new FakeProcess();
+  autoReply(process);
+  const original = process.handler!;
+  const option = 'DRAM261218C100000.US';
+  process.handler = request => {
+    if (request.method !== 'quote.subscribe' || (request.params.symbols as string[])[0] !== option) original(request);
+  };
+  const bridge = new QuoteBridge({ processFactory: () => process.asProcess(), requestTimeoutMs: 100 });
+  const events: MarketStreamEvent[] = [];
+  try {
+    bridge.subscribe(SYMBOL, 'day', event => events.push(event));
+    await flush();
+    const cancel = bridge.subscribe(option, 'day', () => undefined);
+    await flush();
+    context.mock.timers.tick(100);
+    await flush();
+    assert.equal(process.killed, false);
+    assert.equal(events.some(event => event.type === 'status' && event.state === 'reconnecting'), false);
+    cancel();
+    await flush();
+    context.mock.timers.tick(10000);
+    await flush();
+    assert.equal(requests(process, 'quote.subscribe').filter(request => (request.params.symbols as string[])[0] === option).length, 1);
+    process.notify({ symbol: SYMBOL, timestamp: '2026-10-19T14:31:00Z', last_done: '13', trade_session: 0 });
+    assert.equal(quotes(events).at(-1)?.price, 13);
+  } finally { bridge.close(); context.mock.timers.reset(); }
+});
+
 test('断线指数重连恢复订阅和 count1000 补缺，最后离开取消重连', async (context) => {
   context.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse(TIME) });
   const processes: FakeProcess[] = [];
@@ -568,16 +638,107 @@ test('SSE 同步订阅回调内断开仍清理刚返回的取消函数', () => {
   } finally { hub.close(); }
 });
 
+test('CLI只报价订阅不查询K线，正常柱消费者退出后停止轮询', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const process = new FakeProcess(); autoReply(process);
+  const bridge = new QuoteBridge({ processFactory: () => process.asProcess() });
+  const events: MarketStreamEvent[] = [];
+  const cancelQuote = bridge.subscribe(SYMBOL, 'day', event => events.push(event), false);
+  let cancelCandles: (() => void) | undefined;
+  try {
+    await flush(); assert.equal(requests(process, 'quote.candlesticks').length, 0);
+    assert.ok(quotes(events).length > 0);
+    context.mock.timers.tick(5000); await flush();
+    assert.equal(requests(process, 'quote.candlesticks').length, 0);
+    cancelCandles = bridge.subscribe(SYMBOL, 'day', () => {}); await flush();
+    assert.equal(requests(process, 'quote.candlesticks').length, 1);
+    assert.equal(events.some(event => event.type === 'candles'), false);
+    cancelCandles(); context.mock.timers.tick(5000); await flush();
+    assert.equal(requests(process, 'quote.candlesticks').length, 1);
+  } finally { cancelCandles?.(); cancelQuote(); bridge.close(); context.mock.timers.reset(); }
+});
+
+test('SSE正股桌面连接正常时不启动CLI，原生柱仍独立发送', () => {
+  let cliStarts = 0; let releases = 0;
+  let native!: (event: MarketStreamEvent) => void; let candles!: (event: MarketStreamEvent) => void;
+  const hub = new MarketStreamHub({ bridge: { subscribe: () => { cliStarts++; throw new Error('CLI未安装'); }, close: () => undefined },
+    nativeQuoteProvider: (_symbol, callback) => { native = callback; return () => { releases++; }; },
+    desktopCandleProvider: (_symbol, _period, callback) => { candles = callback; return () => { releases++; }; } });
+  const response = new FakeResponse();
+  try {
+    hub.open(fakeRequest(), response.asResponse(), 'QQQ.US', 'day');
+    native({ type: 'status', symbol: 'QQQ.US', state: 'connecting', message: '正在启动' });
+    const connecting = streamEvents(response).at(-1)!;
+    assert.equal(connecting.type === 'status' ? connecting.state : null, 'connecting');
+    assert.doesNotMatch(connecting.type === 'status' ? connecting.message : '', /CLI/);
+    native({ type: 'status', symbol: 'QQQ.US', state: 'connected', message: '已连接' });
+    native({ type: 'quote', quote: { symbol: 'QQQ.US', timestamp: 100, price: 20, previousClose: 19, session: 'regular' } });
+    candles({ type: 'candles', symbol: 'QQQ.US', period: 'day', candles: [], receivedAt: TIME });
+    assert.equal(cliStarts, 0); assert.equal(quotes(streamEvents(response)).length, 1);
+    assert.equal(streamEvents(response).at(-1)?.type, 'candles');
+    response.emit('close'); assert.equal(releases, 2);
+  } finally { hub.close(); }
+});
+
+test('SSE 期权桌面K线独立于CLI失败，过滤CLI柱并完整释放', () => {
+  const option = 'DRAM270115C70000.US';
+  let cli!: (event: MarketStreamEvent) => void;
+  let desktop!: (event: MarketStreamEvent) => void;
+  let native!: (event: MarketStreamEvent) => void;
+  let released = 0; let cliCandles: boolean | undefined;
+  const hub = new MarketStreamHub({ bridge: {
+    subscribe: (_symbol, _period, callback, candles) => { cli = callback; cliCandles = candles; return () => { released++; }; },
+    close: () => undefined,
+  }, nativeQuoteProvider: (_symbol, callback) => { native = callback; return () => { released++; }; },
+  desktopCandleProvider: (_symbol, _period, callback) => { desktop = callback; return () => { released++; }; } });
+  const response = new FakeResponse();
+  try {
+    hub.open(fakeRequest(), response.asResponse(), option, 'day');
+    assert.equal(cliCandles, undefined);
+    native({ type: 'status', symbol: option, state: 'error', message: '桌面报价暂不可用' });
+    assert.equal(cliCandles, false);
+    cli({ type: 'status', symbol: option, state: 'error', message: 'CLI拒绝订阅' });
+    const event = { type: 'candles' as const, symbol: option, period: 'day' as const, candles: [], receivedAt: TIME };
+    cli(event); assert.equal(streamEvents(response).some(item => item.type === 'candles'), false);
+    desktop(event); assert.equal(streamEvents(response).at(-1)?.type, 'candles');
+    native({ type: 'status', symbol: option, state: 'connected', message: '已连接' });
+    cli({ type: 'status', symbol: option, state: 'connected', message: '报价已连接' });
+    const status = streamEvents(response).at(-1)!;
+    assert.match(status.type === 'status' ? status.message : '', /桌面通道/);
+    assert.doesNotMatch(status.type === 'status' ? status.message : '', /CLI 原生 K 线同步已连接/);
+    response.emit('close'); assert.equal(released, 3);
+    const count = response.chunks.length; desktop(event); assert.equal(response.chunks.length, count);
+  } finally { hub.close(); }
+});
+
+test('SSE 期权K线同步回调内关闭仍回收刚返回的订阅', () => {
+  const response = new FakeResponse(); let released = 0;
+  const hub = new MarketStreamHub({ bridge: { subscribe: () => () => { released++; }, close: () => undefined },
+    nativeQuoteProvider: () => () => { released++; },
+    desktopCandleProvider: (_symbol, _period, callback) => {
+      response.writableLength = 256 * 1024;
+      callback({ type: 'candles', symbol: 'DRAM270115C70000.US', period: 'day', candles: [], receivedAt: TIME });
+      return () => { released++; };
+    } });
+  try {
+    hub.open(fakeRequest(), response.asResponse(), 'DRAM270115C70000.US', 'day');
+    assert.equal(response.destroyed, true); assert.equal(released, 2);
+  } finally { hub.close(); }
+});
+
 test('SSE native connected 优先报价，失败切换 CLI，报价时间跨通道不回退', () => {
   let native: (event: MarketStreamEvent) => void = () => undefined;
   let cli: (event: MarketStreamEvent) => void = () => undefined;
   let released = 0;
   const hub = new MarketStreamHub({ bridge: {
     subscribe: (_symbol, _period, callback) => { cli = callback; return () => { released += 1; }; }, close: () => undefined,
-  }, nativeQuoteProvider: (_symbol, callback) => { native = callback; return () => { released += 1; }; } });
+  }, nativeQuoteProvider: (_symbol, callback) => { native = callback; return () => { released += 1; }; },
+  desktopCandleProvider: () => () => undefined });
   const response = new FakeResponse();
   try {
     hub.open(fakeRequest(), response.asResponse(), SYMBOL, 'day');
+    assert.equal(released, 0);
+    native({ type: 'status', symbol: SYMBOL, state: 'error', message: '桌面连接暂不可用' });
     cli({ type: 'status', symbol: SYMBOL, state: 'connected', message: 'CLI订阅已完成' });
     native({ type: 'status', symbol: SYMBOL, state: 'connecting', message: '正在启动' });
     const fallbackStatus = streamEvents(response).at(-1)!;
@@ -587,6 +748,14 @@ test('SSE native connected 优先报价，失败切换 CLI，报价时间跨通�
     cli({ type: 'quote', quote });
     native({ type: 'quote', quote: { ...quote, timestamp: quote.timestamp + 10, price: 11 } });
     assert.equal(quotes(streamEvents(response)).length, 1);
+    cli({ type: 'status', symbol: SYMBOL, state: 'error', message: '合约K线同步失败' });
+    const degraded = streamEvents(response).at(-1)!;
+    assert.equal(degraded.type === 'status' ? degraded.state : null, 'connected');
+    assert.match(degraded.type === 'status' ? degraded.message : '', /CLI 通道提示/);
+    native({ type: 'status', symbol: SYMBOL, state: 'connected', message: '报价继续推送' });
+    const healthy = streamEvents(response).at(-1)!;
+    assert.equal(healthy.type === 'status' ? healthy.state : null, 'connected');
+    cli({ type: 'status', symbol: SYMBOL, state: 'connected', message: 'K线恢复' });
     native({ type: 'status', symbol: SYMBOL, state: 'error', message: '已断开' });
     cli({ type: 'quote', quote });
     assert.equal(quotes(streamEvents(response)).length, 1);

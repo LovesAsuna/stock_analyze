@@ -50,6 +50,10 @@ h1 { font-size: 27px; font-weight: 600; letter-spacing: -.045em; }
 .source-actions { @apply flex flex-wrap items-center gap-3; }
 .source-control { @apply rounded-lg border border-border bg-surface; gap: 8px; padding-left: 12px; flex-wrap: nowrap; font-size: 11px; }
 .source-control select { @apply bg-transparent; border: 0; font-size: 12px; padding-right: 8px; }
+/* 组合控件统一高亮外壳并向内描边，避免下拉框焦点环越过边界。 */
+.source-control:focus-within { border-color: var(--color-accent); }
+.source-control:has(select:focus-visible) { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+.source-control select:focus-visible { outline: none; }
 .source-control label { white-space: nowrap; }
 .source-actions .auth-trigger { @apply rounded-lg; }
 .demo-banner { @apply rounded-lg border-border bg-surface; border-left: 3px solid var(--color-warning); padding: 12px 16px; gap: 10px; margin-bottom: 22px; font-size: 11px; }

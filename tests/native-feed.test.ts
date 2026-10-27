@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
-import { createNativeFeed } from '../server/native-feed.js';
+import { createNativeFeed, NativeFeed } from '../server/native-feed.js';
 import type { MarketStreamEvent } from '../shared/realtime.js';
 
 const require = createRequire(import.meta.url);
@@ -16,8 +16,9 @@ async function flush(): Promise<void> { await new Promise<void>((resolve) => set
 /** 创建可控Promise。参数：无；返回：Promise与完成函数。 */
 function deferred() {
   let resolve!: (value: unknown) => void;
-  const promise = new Promise((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (error: Error) => void;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 /** 创建不加载原生模块的行情假引擎。参数：无；返回：原生方法替身及记录。 */
@@ -88,14 +89,14 @@ test('原生重连恢复所有目标，过期搜索及快照不能覆盖新一�
     await flush(); assert.equal(native.subscriptions.length, 0);
     native.searchJobs[2].resolve(security()); native.searchJobs[3].resolve(security('700', 'HK', 'ST'));
     await flush(); assert.equal(native.subscriptions.length, 2);
-    assert.equal(events.some((item) => item.data.state === 'connected'), false);
+    assert.equal(events.some((item) => item.event === 'status' && item.data.state === 'connected'), false);
     callback('message', { type: 'quote/detail', counter_id: 'ETF/US/QQQ', data: { ...rawQuote(110, '110'), prev_close: undefined } });
     native.snapshotJobs[0].resolve({ code: 0, data: rawQuote(100, '100') });
     native.snapshotJobs[1].resolve({ code: 0, data: { ...rawQuote(), counter_id: 'ST/HK/700' } });
     await flush();
     const qqq = events.filter((item) => item.event === 'quote' && item.data.symbol === 'QQQ.US');
     assert.equal(qqq.at(-1)?.data.price, 110); assert.equal(qqq.at(-1)?.data.previousClose, 90);
-    assert.equal(events.filter((item) => item.data.state === 'connected').length, 2);
+    assert.equal(events.filter((item) => item.event === 'status' && item.data.state === 'connected').length, 2);
     worker.unsubscribe('QQQ.US');
     callback('message', { type: 'quote/detail', counter_id: 'ETF/US/QQQ', data: rawQuote(120) });
     assert.equal(events.filter((item) => item.event === 'quote' && item.data.symbol === 'QQQ.US').length, qqq.length);
@@ -142,6 +143,178 @@ test('取消目标和重连后，旧快照不能确认新目标或覆盖价格',
     native.snapshotJobs[2].resolve({ code: 0, data: rawQuote(100, '100') }); await flush();
     assert.equal(events.filter((item) => item.event === 'quote').at(-1).data.price, 100);
   } finally { worker.close(); }
+});
+
+test('有效期权推送后快照失败或超时不降级连接并持续传递报价', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const failure of ['reject', 'timeout', 'response']) {
+    const native = mockNative(); const events: MarketStreamEvent[] = []; let stops = 0;
+    const engine = new EventEmitter() as EventEmitter & { call: (method: string, payload?: { symbol: string }) => Promise<any>; stop: () => Promise<void> };
+    const worker = new NativeQuoteWorker(native, (event: string, data: unknown) => engine.emit(event, data));
+    engine.call = async (method, payload) => method === 'connect' ? worker.connect() : worker[method](payload?.symbol);
+    engine.stop = async () => { stops++; worker.close(); };
+    const feed = new NativeFeed(engine); const symbol = 'RKLB261218C00100000.US'; const counter = 'OPTION/US/RKLB261218C00100000';
+    try {
+      feed.subscribe(symbol, (event) => events.push(event)); await flush();
+      native.callbacks[0]('message', { type: 'authenticated' });
+      native.searchJobs[0].resolve(security(symbol.slice(0, -3), 'US', 'OPTION')); await flush();
+      native.callbacks[0]('message', { type: 'quote/detail', counter_id: counter, data: rawQuote(100) });
+      if (failure === 'reject') native.snapshotJobs[0].reject(new Error('synthetic snapshot failure'));
+      else if (failure === 'timeout') context.mock.timers.tick(12000);
+      else native.snapshotJobs[0].resolve({ code: 403 });
+      await flush();
+      native.callbacks[0]('message', { type: 'quote/detail', counter_id: counter, data: rawQuote(101) });
+      context.mock.timers.tick(4000); await flush();
+      assert.deepEqual(events.filter((event) => event.type === 'quote').map((event) => event.quote.timestamp), [100, 101]);
+      assert.equal(events.some((event) => event.type === 'status' && event.state === 'error'), false);
+      assert.equal(stops, 0); assert.equal(native.searchJobs.length, 1);
+    } finally { await feed.close(); }
+  }
+  context.mock.timers.reset();
+});
+
+test('期权WS快照失败使用桌面HTTP且拒绝旧会话继续回退', async () => {
+  const native = mockNative(); const worker = new NativeQuoteWorker(native, () => {});
+  let requests = 0; const symbol = 'DRAM270115C70000.US'; const counter = 'OP/US/DRAM270115C70000';
+  Object.assign(native, { httpRequest: async (_method: string, path: string, raw: string) => {
+    requests++; assert.equal(path, '/v2/quote/option/detail'); assert.equal(JSON.parse(raw).counter_id, counter);
+    return { data: { ...rawQuote(), counter_id: counter } };
+  } });
+  worker.httpClient = {};
+  try {
+    worker.subscribe(symbol); worker.connect(); native.callbacks[0]('message', { type: 'authenticated' });
+    native.searchJobs[0].resolve(security(symbol.slice(0, -3), 'US', 'OP')); await flush();
+    native.snapshotJobs[0].resolve({ code: 403 }); await flush();
+    assert.equal(requests, 1); assert.equal(worker.targets.get(symbol).confirmed, true);
+    native.callbacks[0]('reconnecting', {}); native.callbacks[0]('message', { type: 'authenticated' });
+    native.searchJobs[1].resolve(security(symbol.slice(0, -3), 'US', 'OP')); await flush();
+    worker.unsubscribe(symbol); native.snapshotJobs[1].reject(new Error('late failure')); await flush();
+    assert.equal(requests, 1);
+  } finally { worker.close(); }
+});
+
+test('重连的当前代旧快照可确认连接且保留更新价格与时间', async () => {
+  const native = mockNative(); const events: any[] = [];
+  const worker = new NativeQuoteWorker(native, (event: string, data: any) => events.push({ event, data }));
+  try {
+    worker.subscribe('QQQ.US'); worker.connect(); const callback = native.callbacks[0];
+    callback('message', { type: 'authenticated' }); native.searchJobs[0].resolve(security()); await flush();
+    native.snapshotJobs[0].resolve({ code: 0, data: rawQuote(110, '110') }); await flush();
+    callback('reconnecting', {}); callback('message', { type: 'authenticated' });
+    native.searchJobs[1].resolve(security()); await flush();
+    native.snapshotJobs[1].resolve({ code: 0, data: rawQuote(100, '100') }); await flush();
+    assert.equal(events.filter((item) => item.event === 'status').at(-1).data.state, 'connected');
+    assert.equal(events.filter((item) => item.event === 'quote').at(-1).data.timestamp, 110);
+    assert.equal(events.filter((item) => item.event === 'quote').at(-1).data.price, 110);
+  } finally { worker.close(); }
+});
+
+test('rejected清除已确认和搜索中标记，旧搜索不能污染重新认证', async () => {
+  const native = mockNative(); const events: any[] = [];
+  const worker = new NativeQuoteWorker(native, (event: string, data: any) => events.push({ event, data }));
+  try {
+    worker.subscribe('QQQ.US'); worker.subscribe('700.HK'); worker.connect(); const callback = native.callbacks[0];
+    callback('message', { type: 'authenticated' }); native.searchJobs[0].resolve(security()); await flush();
+    native.snapshotJobs[0].resolve({ code: 0, data: rawQuote() }); await flush();
+    callback('message', { type: 'rejected' }); callback('message', { type: 'authenticated' });
+    assert.equal(native.searchJobs.length, 4);
+    native.searchJobs[1].resolve(security('700', 'HK', 'ST')); await flush();
+    assert.equal(native.subscriptions.length, 1);
+    native.searchJobs[2].resolve(security()); native.searchJobs[3].resolve(security('700', 'HK', 'ST')); await flush();
+    native.snapshotJobs[1].resolve({ code: 0, data: rawQuote(101) });
+    native.snapshotJobs[2].resolve({ code: 0, data: { ...rawQuote(), counter_id: 'ST/HK/700' } }); await flush();
+    for (const symbol of ['QQQ.US', '700.HK']) {
+      assert.equal(events.filter((item) => item.event === 'status' && item.data.symbol === symbol).at(-1).data.state, 'connected');
+    }
+  } finally { worker.close(); }
+});
+
+test('单个期权失败仅重试该目标，正常行情和共享进程持续可用', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const native = mockNative(); const events: MarketStreamEvent[] = []; let stops = 0;
+  const engine = new EventEmitter() as EventEmitter & { call: (method: string, payload?: { symbol: string }) => Promise<any>; stop: () => Promise<void> };
+  const worker = new NativeQuoteWorker(native, (event: string, data: unknown) => engine.emit(event, data));
+  engine.call = async (method, payload) => method === 'connect' ? worker.connect() : worker[method](payload?.symbol);
+  engine.stop = async () => { stops++; worker.close(); };
+  const feed = new NativeFeed(engine); const option = 'DRAM261218C00100000.US';
+  try {
+    feed.subscribe('QQQ.US', (event) => events.push(event));
+    const cancelOption = feed.subscribe(option, (event) => events.push(event)); await flush();
+    native.callbacks[0]('message', { type: 'authenticated' });
+    native.searchJobs[0].resolve(security()); native.searchJobs[1].resolve({ data: [] }); await flush();
+    native.snapshotJobs[0].resolve({ code: 0, data: rawQuote() }); await flush();
+    assert.equal(native.searchParameters[2].term, 'DRAM');
+    native.searchJobs[2].resolve({ data: [] }); await flush();
+    context.mock.timers.tick(4000); await flush();
+    assert.equal(native.searchJobs.length, 4); assert.equal(native.searchParameters[3].term, option.slice(0, -3));
+    native.searchJobs[3].resolve(security(option.slice(0, -3), 'US', 'OPTION')); await flush();
+    native.snapshotJobs[1].resolve({ code: 403 }); await flush();
+    native.callbacks[0]('message', { type: 'quote/detail', counter_id: 'ETF/US/QQQ', data: rawQuote(101) });
+    assert.equal(events.filter((event) => event.type === 'quote').at(-1)?.quote.timestamp, 101);
+    assert.equal(stops, 0); assert.equal(native.callbacks.length, 1);
+    cancelOption(); await flush(); context.mock.timers.tick(100000); await flush();
+    assert.equal(native.searchJobs.length, 4); assert.equal(stops, 0);
+    assert.equal(events.some((event) => event.type === 'status' && event.symbol === 'QQQ.US' && event.state === 'reconnecting'), false);
+  } finally { await feed.close(); context.mock.timers.reset(); }
+});
+
+test('协议重新认证后证券失败不延续旧连接重启，后续断线仍恢复', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const native = mockNative(); let stops = 0;
+  const engine = new EventEmitter() as EventEmitter & { call: (method: string, payload?: { symbol: string }) => Promise<any>; stop: () => Promise<void> };
+  const worker = new NativeQuoteWorker(native, (event: string, data: unknown) => engine.emit(event, data));
+  engine.call = async (method, payload) => method === 'connect' ? worker.connect() : worker[method](payload?.symbol);
+  engine.stop = async () => { stops++; worker.close(); };
+  const feed = new NativeFeed(engine);
+  try {
+    feed.subscribe('QQQ.US', () => {}); await flush(); const callback = native.callbacks[0];
+    callback('message', { type: 'authenticated' }); callback('reconnecting', {});
+    callback('message', { type: 'authenticated' }); native.searchJobs[1].resolve({ data: [] }); await flush();
+    context.mock.timers.tick(4000); await flush(); assert.equal(stops, 0); assert.equal(native.searchJobs.length, 3);
+    callback('error', {}); context.mock.timers.tick(4000); await flush(); assert.equal(stops, 1);
+  } finally { await feed.close(); context.mock.timers.reset(); }
+});
+
+test('目标重试有界退避，成功确认取消待执行重试', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const native = mockNative(); const worker = new NativeQuoteWorker(native, () => {});
+  try {
+    worker.subscribe('QQQ.US'); worker.connect(); native.callbacks[0]('message', { type: 'authenticated' });
+    for (const [index, delay] of [4000, 8000, 16000].entries()) {
+      native.searchJobs[index].resolve({ data: [] }); await flush();
+      context.mock.timers.tick(delay); await flush();
+    }
+    native.searchJobs[3].resolve({ data: [] }); await flush(); context.mock.timers.tick(100000); await flush();
+    assert.equal(native.searchJobs.length, 4);
+    worker.unsubscribe('QQQ.US'); worker.subscribe('QQQ.US');
+    native.searchJobs[4].resolve(security()); await flush(); native.snapshotJobs[0].resolve({ code: 403 }); await flush();
+    native.callbacks[0]('message', { type: 'quote/detail', counter_id: 'ETF/US/QQQ', data: rawQuote() });
+    context.mock.timers.tick(100000); await flush(); assert.equal(native.searchJobs.length, 5);
+  } finally { worker.close(); context.mock.timers.reset(); }
+});
+
+test('短暂connected不清零进程恢复预算，稳定连接后允许重新恢复', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  class Engine extends EventEmitter {
+    stops = 0;
+    /** 提交内存操作。参数：无；返回：成功Promise。 */
+    async call() {}
+    /** 记录共享进程停止。参数：无；返回：成功Promise。 */
+    async stop() { this.stops++; }
+  }
+  const engine = new Engine(); const feed = new NativeFeed(engine);
+  try {
+    feed.subscribe('QQQ.US', () => {}); await flush();
+    for (const delay of [4000, 8000, 16000, 32000]) {
+      engine.emit('status', { symbol: 'QQQ.US', state: 'connected', message: 'synthetic confirmation' });
+      engine.emit('status', { symbol: 'QQQ.US', state: 'error', scope: 'connection', message: 'synthetic connection failure' });
+      context.mock.timers.tick(delay); await flush();
+    }
+    assert.equal(engine.stops, 3);
+    engine.emit('status', { symbol: 'QQQ.US', state: 'connected', message: 'synthetic stable connection' });
+    context.mock.timers.tick(30000); await flush();
+    engine.emit('state', {}); context.mock.timers.tick(4000); await flush(); assert.equal(engine.stops, 4);
+  } finally { await feed.close(); context.mock.timers.reset(); }
 });
 
 test('同步取消尚未启动的订阅不会为了unsubscribe启动原生进程', async () => {

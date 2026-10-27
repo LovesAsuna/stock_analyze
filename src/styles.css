@@ -80,7 +80,13 @@ select { background: var(--color-paper-2); border: 1px solid var(--color-rule); 
 .quote small { color: var(--color-muted); }
 .realtime-status { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-xs) var(--space-md); padding: var(--space-xs) var(--space-md); border-top: 1px solid var(--color-rule); color: var(--color-muted); font-size: var(--text-xs); }
 .realtime-status strong { color: var(--color-ink); }
-.realtime-status > span { min-width: 0; overflow-wrap: anywhere; }
+.realtime-status > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.realtime-connection { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-xs) var(--space-md); }
+.realtime-status .realtime-error { color: var(--color-error); }
+.realtime-quote-time { font-variant-numeric: tabular-nums; }
+.realtime-diagnostics summary { cursor: pointer; }
+.realtime-diagnostics[open] { flex-basis: 100%; }
+.realtime-diagnostics p { margin-top: var(--space-xs); }
 .up { color: var(--color-up); }
 .down { color: var(--color-down); }
 .chart-toolbar { border-top: 1px solid var(--color-rule); border-bottom: 1px solid var(--color-rule); display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2xs); padding: var(--space-xs); }

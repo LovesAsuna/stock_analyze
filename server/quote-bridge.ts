@@ -14,6 +14,9 @@ const METHODS = new Set<QuoteMethod>(['initialize', 'quote.subscribe', 'quote.un
 const MAX_BYTES = 2 * 1024 * 1024;
 const CANDLE_INTERVAL = 5_000;
 
+/** 单次 RPC 被上游拒绝，与进程或传输断开区分，不携带上游敏感原文。 */
+class QuoteRequestError extends Error {}
+
 interface Pending {
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
@@ -80,7 +83,7 @@ export class LongbridgeRpc {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Longbridge ${method} 请求超时。`));
+        reject(new QuoteRequestError(`Longbridge ${method} 请求超时。`));
       }, this.timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       try {
@@ -137,7 +140,7 @@ export class LongbridgeRpc {
       if (!pending) return;
       this.pending.delete(message.id as number);
       clearTimeout(pending.timer);
-      if ('error' in message) pending.reject(new Error('Longbridge 行情 RPC 返回错误，请检查登录和行情权限。'));
+      if ('error' in message) pending.reject(new QuoteRequestError('Longbridge 行情 RPC 返回错误，请检查登录和行情权限。'));
       else if ('result' in message) pending.resolve(message.result);
       else pending.reject(new Error('Longbridge 行情 RPC 响应结构无效。'));
     } else if (typeof message.method === 'string') {
@@ -194,6 +197,7 @@ export class LongbridgeRpc {
 interface CandleGroup {
   period: Period;
   listeners: Map<symbol, Listener>;
+  candleListeners: Set<symbol>;
   candles: Candle[];
   receivedAt: string;
   full: boolean;
@@ -207,6 +211,7 @@ interface SymbolFeed {
   subscribed: boolean;
   quote: RealtimeQuote | null;
   warning: boolean;
+  retryAt?: number;
   syncing?: Promise<void>;
 }
 export interface QuoteBridgeOptions {
@@ -236,9 +241,10 @@ export class QuoteBridge {
    * @param symbol 港美股证券代码，将在边界重新验证。
    * @param period 受支持的 K 线周期；季度由原生月线聚合。
    * @param listener 接收统一事件的回调。
+   * @param candles 是否同步CLI柱；桌面期权通道接管时只保留备用报价。
    * @returns 幂等的取消监听函数；最后一个引用释放全部进程和定时器。
    */
-  subscribe(symbol: string, period: Period, listener: Listener): () => void {
+  subscribe(symbol: string, period: Period, listener: Listener, candles = true): () => void {
     symbol = normalizeSymbol(symbol);
     if (!isPeriod(period)) throw new Error('不支持的 K 线周期。');
     let feed = this.feeds.get(symbol);
@@ -248,15 +254,16 @@ export class QuoteBridge {
     }
     let group = feed.groups.get(period);
     if (!group) {
-      group = { period, listeners: new Map(), candles: [], receivedAt: '', full: true, lastStarted: 0, warning: false };
+      group = { period, listeners: new Map(), candleListeners: new Set(), candles: [], receivedAt: '', full: true, lastStarted: 0, warning: false };
       feed.groups.set(period, group);
     }
-    if (!group.listeners.size) group.full = true;
+    if (candles && !group.candleListeners.size) group.full = true;
     const token = Symbol('listener');
     group.listeners.set(token, listener);
+    if (candles) group.candleListeners.add(token);
     this.deliver(listener, this.status(feed, group));
     if (feed.quote) this.deliver(listener, { type: 'quote', quote: feed.quote });
-    if (group.candles.length) this.deliver(listener, this.candleEvent(feed, group));
+    if (candles && group.candles.length) this.deliver(listener, this.candleEvent(feed, group));
     this.connect();
     if (this.ready) {
       this.synchronize(feed);
@@ -266,6 +273,7 @@ export class QuoteBridge {
     const ownedGroup = group;
     return () => {
       if (!ownedGroup.listeners.delete(token)) return;
+      ownedGroup.candleListeners.delete(token);
       if (!this.hasClients()) { this.close(); return; }
       if (this.ready) this.synchronize(ownedFeed);
       else if (!this.references(ownedFeed)) this.feeds.delete(ownedFeed.symbol);
@@ -327,7 +335,9 @@ export class QuoteBridge {
    */
   private emit(feed: SymbolFeed, event: MarketStreamEvent, group?: CandleGroup): void {
     for (const target of group ? [group] : [...feed.groups.values()]) {
-      for (const listener of [...target.listeners.values()]) this.deliver(listener, event);
+      for (const [token, listener] of [...target.listeners]) {
+        if (event.type !== 'candles' || target.candleListeners.has(token)) this.deliver(listener, event);
+      }
     }
   }
 
@@ -340,10 +350,15 @@ export class QuoteBridge {
   private status(feed: SymbolFeed, group: CandleGroup): MarketStreamEvent {
     let state = this.state;
     let message = state === 'reconnecting' ? '行情连接已断开，正在重连。' : '正在连接实时行情。';
-    if (this.ready && feed.subscribed) {
-      state = feed.warning || group.warning ? 'error' : 'connected';
-      message = group.warning ? '原生 K 线同步失败，将自动重试；报价继续推送。'
-        : feed.warning ? '收到无效报价，已忽略并等待有效行情。' : '实时报价已订阅；原生 K 线每 5 秒同步。';
+    if (this.ready && feed.retryAt && !feed.subscribed) {
+      state = 'error';
+      message = '当前证券订阅暂不可用，将自动重试；请检查该证券的行情权限或合约有效性。';
+    } else if (this.ready && feed.subscribed) {
+      const candleWarning = group.candleListeners.size > 0 && group.warning;
+      state = feed.warning || candleWarning ? 'error' : 'connected';
+      message = candleWarning ? '原生 K 线同步失败，将自动重试；报价继续推送。'
+        : feed.warning ? '收到无效报价，已忽略并等待有效行情。'
+          : group.candleListeners.size ? '实时报价已订阅；原生 K 线每 5 秒同步。' : '实时报价已订阅。';
     }
     return { type: 'status', symbol: feed.symbol, state, message };
   }
@@ -392,6 +407,7 @@ export class QuoteBridge {
     this.candleTimer = undefined;
     for (const feed of this.feeds.values()) {
       feed.subscribed = false;
+      feed.retryAt = undefined;
       feed.syncing = undefined;
       feed.warning = false;
       for (const group of feed.groups.values()) {
@@ -417,10 +433,10 @@ export class QuoteBridge {
   /**
    * 串行协调同一证券的订阅/退订，处理 RPC 在途期间引用的增减。
    * @param feed 目标证券共享状态。
-   * @returns 无返回值；失败通过统一重连恢复。
+   * @returns 无返回值；单证券拒绝独立重试，传输故障才重建共享连接。
    */
   private synchronize(feed: SymbolFeed): void {
-    if (feed.syncing || !this.rpc || !this.ready) return;
+    if (feed.syncing || !this.rpc || !this.ready || (feed.retryAt && Date.now() < feed.retryAt && this.references(feed))) return;
     const rpc = this.rpc;
     const generation = this.generation;
     const job = (async () => {
@@ -431,6 +447,7 @@ export class QuoteBridge {
         });
         if (generation !== this.generation) return;
         feed.subscribed = subscribe;
+        feed.retryAt = undefined;
         if (subscribe && this.references(feed)) {
           this.reconnectAttempt = 0;
           this.applySnapshots(feed, result);
@@ -441,7 +458,16 @@ export class QuoteBridge {
       if (generation === this.generation && !this.references(feed)) this.feeds.delete(feed.symbol);
     })();
     feed.syncing = job;
-    void job.catch(() => this.disconnected(generation)).finally(() => {
+    void job.catch((error) => {
+      if (generation !== this.generation) return;
+      if (!(error instanceof QuoteRequestError)) { this.disconnected(generation); return; }
+      // 权限、合约等请求拒绝属于证券范围，不能让健康股票和原生报价跟着断线。
+      feed.subscribed = false;
+      feed.retryAt = Date.now() + CANDLE_INTERVAL;
+      console.warn('[quote-bridge] 单证券订阅请求被拒绝，保留共享连接并稍后重试');
+      if (this.references(feed)) this.emitStatus(feed);
+      else this.feeds.delete(feed.symbol);
+    }).finally(() => {
       if (feed.syncing === job) feed.syncing = undefined;
       // 同步无等待完成时，调用方仍可能在同一轮事件内改变引用，结束后再对齐一次。
       if (generation === this.generation && this.feeds.get(feed.symbol) === feed &&
@@ -521,7 +547,7 @@ export class QuoteBridge {
    */
   private syncCandles(feed: SymbolFeed, group: CandleGroup): Promise<void> {
     if (group.flight) return group.flight;
-    if (!this.rpc || !this.ready || !feed.subscribed || !group.listeners.size ||
+    if (!this.rpc || !this.ready || !feed.subscribed || !group.candleListeners.size ||
       (group.lastStarted && Date.now() - group.lastStarted < CANDLE_INTERVAL)) return Promise.resolve();
     const rpc = this.rpc;
     const generation = this.generation;
@@ -534,7 +560,7 @@ export class QuoteBridge {
           symbol: feed.symbol, period: quarterly ? 'month' : group.period, count: group.full ? 1000 : quarterly ? 12 : 5,
           adjust_type: 'no_adjust', trade_sessions: 'intraday',
         });
-        if (generation !== this.generation || !group.listeners.size) return;
+        if (generation !== this.generation || !group.candleListeners.size) return;
         const candles = normalizeCandles(result, feed.symbol, group.period);
         if (!candles.length || candles.length > 1000) throw new Error('原生 K 线数量无效。');
         // 保留最多 1000 根供后加入的客户端补缺；已连接客户端仅发送本次原生增量。
@@ -546,7 +572,7 @@ export class QuoteBridge {
           candles, receivedAt: group.receivedAt }, group);
         if (group.warning) { group.warning = false; this.emit(feed, this.status(feed, group), group); }
       } catch {
-        if (generation !== this.generation || !group.listeners.size) return;
+        if (generation !== this.generation || !group.candleListeners.size) return;
         group.warning = true;
         group.full = true;
         this.emit(feed, this.status(feed, group), group);
@@ -566,6 +592,7 @@ export class QuoteBridge {
       this.candleTimer = undefined;
       const jobs: Promise<void>[] = [];
       for (const feed of this.feeds.values()) {
+        if (!feed.subscribed) this.synchronize(feed);
         for (const group of feed.groups.values()) jobs.push(this.syncCandles(feed, group));
       }
       void Promise.all(jobs).finally(() => {

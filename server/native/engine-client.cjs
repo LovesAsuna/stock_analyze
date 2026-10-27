@@ -129,18 +129,20 @@ class EngineClient extends EventEmitter {
 
   /** 执行受限RPC。参数：method操作、payload参数；返回：结果Promise。 */
   async call(method, payload = {}) {
-    if (!['connect', 'subscribe', 'unsubscribe', 'qr-create', 'qr-poll'].includes(method)) throw new Error('不支持的隔离行情会话操作');
+    if (!['connect', 'subscribe', 'unsubscribe', 'qr-create', 'qr-poll', 'candles', 'intraday'].includes(method)) throw new Error('不支持的隔离行情会话操作');
     if (method === 'unsubscribe' && !this.child?.connected) return { removed: true };
     await this.start();
     const child = this.child;
     if (this.stopping || !child?.connected || this.run?.cancelled) throw new Error('行情引擎已停止');
     return new Promise((resolve, reject) => {
       const id = ++this.nextId;
-      // 超时后的操作可能仍在原生层执行；销毁本代会话，防止迟到的订阅污染后续会话。
+      // 只读K线和分时超时仅拒绝该请求；订阅/认证超时需销毁本代会话，阻止迟到操作。
       const timer = setTimeout(() => {
-        this.pending.delete(id); reject(new Error('行情引擎请求超时，隔离会话已停止'));
+        this.pending.delete(id);
+        if (['candles', 'intraday'].includes(method)) { reject(new Error('当前桌面行情请求超时，请稍后重试')); return; }
+        reject(new Error('行情引擎请求超时，隔离会话已停止'));
         this.stop().catch(() => this.emit('log', { kind: 'error', message: '超时会话清理失败，请检查临时目录权限' }));
-      }, 12000);
+      }, ['candles', 'intraday'].includes(method) ? 45000 : 12000);
       this.pending.set(id, { resolve, reject, timer });
       const failed = () => {
         clearTimeout(timer); this.pending.delete(id); reject(new Error('无法向行情进程发送请求'));

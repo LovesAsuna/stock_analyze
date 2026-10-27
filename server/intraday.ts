@@ -1,10 +1,18 @@
 import { cli, normalizeSymbol, rows, timestamp } from './longbridge.js';
+import { nativeSession } from './native-feed.js';
 import { exchangeParts, validateIntradaySelection } from '../shared/intraday.js';
 import type { IntradayData, IntradayPoint, IntradaySession } from '../shared/intraday.js';
 
 type PointSession = IntradayPoint['session'];
-/** 可注入只读 CLI 和时钟，用于测试交易日回溯而不访问真实账户。 */
-export interface IntradayOptions { request?: typeof cli; now?: Date }
+/** 原生分时只读参数，历史日期使用交易所YYYYMMDD。 */
+type IntradayPayload = { symbol: string; session: IntradaySession; date?: string };
+/** 可注入原生请求、旧CLI请求与时钟；仅显式cliFallback时才使用CLI回退。 */
+export interface IntradayOptions {
+  request?: typeof cli;
+  nativeRequest?: (payload: IntradayPayload) => Promise<unknown>;
+  cliFallback?: boolean;
+  now?: Date;
+}
 
 /** 解析非负数，参数为外部值和字段名，返回有限数字或抛出明确结构错误。 */
 function numeric(value: unknown, field: string): number {
@@ -63,6 +71,21 @@ function candidateDates(now: Date, symbol: string): string[] {
     .toISOString().slice(0, 10).replaceAll('-', ''));
 }
 
+/** 执行单日期分时。参数：payload代码时段日期、options请求配置；返回：真实原始响应。 */
+async function requestIntraday(payload: IntradayPayload, options: IntradayOptions): Promise<unknown> {
+  const cliRequest = (): Promise<unknown> => {
+    const args = ['intraday', payload.symbol, '--session', 'all'];
+    if (payload.date) args.push('--date', payload.date);
+    return (options.request ?? cli)(args, payload.date ? 60_000 : 10_000);
+  };
+  if (options.request) return cliRequest();
+  try { return await (options.nativeRequest ?? nativeSession.intradayCall.bind(nativeSession))(payload); }
+  catch {
+    if (options.cliFallback) return cliRequest();
+    throw new Error('桌面原生分时读取失败，请检查桌面安装、网络、登录及行情权限。');
+  }
+}
+
 /**
  * 查询最近有指定时段数据的一日或五日分时；最多十二次、并发最多二，空夜盘绝不替代常规数据。
  * @param symbol 港美证券代码。
@@ -71,7 +94,7 @@ function candidateDates(now: Date, symbol: string): string[] {
  * @param options 可选测试时钟及只读请求器。
  * @returns 标准分时响应；数据不足、权限或历史不可用以明确 warning 呈现。
  */
-export async function liveIntraday(symbol: string, session: IntradaySession, days: 1 | 5,
+async function collectIntraday(symbol: string, session: IntradaySession, days: 1 | 5,
   options: IntradayOptions = {}): Promise<IntradayData> {
   symbol = normalizeSymbol(symbol);
   validateIntradaySelection(session, days);
@@ -83,16 +106,13 @@ export async function liveIntraday(symbol: string, session: IntradaySession, day
     return response;
   }
   const dates = candidateDates(now, symbol);
-  const request = options.request ?? cli;
   const collected = new Map<number, IntradayPoint>();
   let available = 0;
   let failed = 0;
   for (let offset = 0; offset < dates.length && available < days; offset += 2) {
     const batch = await Promise.allSettled(dates.slice(offset, offset + 2).map(async (date) => {
-      // 当前日使用实时分时入口；CLI部分版本对今天显式传date会返回空历史集合。
-      const args = ['intraday', symbol, '--session', 'all'];
-      if (date !== dates[0]) args.push('--date', date);
-      const value = await request(args, date === dates[0] ? 10_000 : 60_000);
+      // 当前入口允许返回最近完整时段，历史严格按交易所日期查询。
+      const value = await requestIntraday({ symbol, session, ...(date === dates[0] ? {} : { date }) }, options);
       return normalizeIntraday(value, symbol).filter((point) => session === 'all' || point.session === session);
     }));
     // 即使较早日期先完成，也必须按候选日期顺序挑选最近交易日。
@@ -104,11 +124,23 @@ export async function liveIntraday(symbol: string, session: IntradaySession, day
       available += 1;
       for (const point of unique) collected.set(point.time, point);
     }
+    // 原生连接不可用时停止整轮回溯，保留已读数据，不再重复触发安装或登录失败。
+    if (!options.request && batch.every((result) => result.status === 'rejected')) break;
   }
   response.points = [...collected.values()].sort((left, right) => left.time - right.time);
-  if (failed) response.warnings.push(`${failed} 个日期分时读取或解析失败，请检查登录、行情权限或历史分时可用性。`);
+  if (failed) response.warnings.push(`${failed} 个日期分时读取或解析失败，请检查${options.request ? 'CLI登录' : '桌面原生引擎、网络、登录'}、行情权限或历史分时可用性。`);
   if (available < days) response.warnings.push(`最近 12 个交易所自然日仅找到 ${available}/${days} 个非空交易日（${session}）；未使用其他时段替代。`);
   if (session === 'overnight' && !response.points.length) response.warnings.push('没有可用的真实夜盘分时，证券、账户权限或该日期可能不支持夜盘。');
   console.info(`[longbridge] intraday 读取完成：${available} 日，${response.points.length} 点，${failed} 次失败`);
   return response;
+}
+
+/** 保持完整一日或五日查询的原生会话代。参数：代码、时段、天数、可选测试配置；返回：完整分时响应。 */
+export async function liveIntraday(symbol: string, session: IntradaySession, days: 1 | 5,
+  options: IntradayOptions = {}): Promise<IntradayData> {
+  symbol = normalizeSymbol(symbol);
+  validateIntradaySelection(session, days);
+  const read = (): Promise<IntradayData> => collectIntraday(symbol, session, days, options);
+  if (options.request || options.nativeRequest) return read();
+  return nativeSession.withCandleSession(read);
 }

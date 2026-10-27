@@ -57,6 +57,50 @@ test('实时事件接受全部原生及季度K线周期', () => {
   }
 });
 
+test('同步元数据独立确认各频道和来源，支持推送、事件触发与实际快照间隔', () => {
+  for (const channel of ['quote', 'candles', 'intraday']) {
+    for (const transport of ['desktop-ws', 'desktop-http', 'cli']) {
+      for (const state of ['connecting', 'connected', 'reconnecting', 'error']) {
+        for (const mode of ['push', 'event', 'snapshot']) {
+          const event = { type: 'sync', symbol: 'DRAM.US', channel, transport, state, mode,
+            ...(mode === 'snapshot' ? { intervalMs: 1250 } : {}), period: 'day', message: '独立同步元数据' };
+          assert.deepEqual(parseStreamEvent(event), event);
+        }
+      }
+    }
+  }
+  const event = { type: 'sync', symbol: 'DRAM.US', channel: 'quote', transport: 'desktop-ws', mode: 'push', state: 'connected' };
+  assert.deepEqual(parseStreamEvent(event), event);
+});
+
+test('快照必须有有限正数间隔，推送和事件触发不得携带间隔', () => {
+  const base = { type: 'sync', symbol: 'DRAM.US', channel: 'candles', transport: 'desktop-http', state: 'connected' };
+  for (const intervalMs of [undefined, null, 0, -1, NaN, Infinity, -Infinity, '5000', {}, true]) {
+    assert.throws(() => parseStreamEvent({ ...base, mode: 'snapshot', intervalMs }), /间隔/);
+  }
+  assert.throws(() => parseStreamEvent({ ...base, mode: 'snapshot' }), /间隔/);
+  for (const mode of ['push', 'event']) {
+    for (const intervalMs of [undefined, null, 0, 5000]) {
+      assert.throws(() => parseStreamEvent({ ...base, mode, intervalMs }), /间隔/);
+    }
+  }
+});
+
+test('同步事件拒绝非法频道、来源、状态、周期及消息，禁止隐式字符串转换', () => {
+  const base = { type: 'sync', symbol: 'DRAM.US', channel: 'quote', transport: 'desktop-ws', mode: 'push', state: 'connected' };
+  for (const [field, values] of Object.entries({
+    channel: ['', 'trades', null, 1, { toString: () => 'quote' }],
+    transport: ['', 'ws', null, { toString: () => 'desktop-ws' }],
+    mode: ['', 'poll', null, { toString: () => 'push' }],
+    state: ['', 'ready', null, { toString: () => 'connected' }],
+    period: [undefined, '', '2m', null, { toString: () => 'day' }],
+    message: [undefined, null, 1, {}],
+    symbol: ['', '   ', null, 1],
+  })) {
+    for (const value of values) assert.throws(() => parseStreamEvent({ ...base, [field]: value }), /同步|证券/);
+  }
+});
+
 test('实时事件拒绝不合法报价、周期与时间字段', () => {
   assert.throws(() => parseStreamEvent({ type: 'quote', quote: { symbol: 'DRAM.US', timestamp: 1, price: -1 } }), /报价/);
   assert.throws(() => parseStreamEvent({ type: 'candles', symbol: 'DRAM.US', period: '1m', candles: [], receivedAt: 'invalid' }), /K线/);

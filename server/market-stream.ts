@@ -4,11 +4,13 @@ import type { Period } from '../shared/types.js';
 import { isPeriod } from '../shared/periods.js';
 import { normalizeSymbol } from './longbridge.js';
 import { quoteBridge, type QuoteBridge } from './quote-bridge.js';
+import { subscribeDesktopCandles } from './desktop-candles.js';
 
 export type NativeQuoteProvider = (symbol: string, onEvent: (event: MarketStreamEvent) => void) => () => void;
 interface StreamOptions {
   bridge?: Pick<QuoteBridge, 'subscribe' | 'close'>;
   nativeQuoteProvider?: NativeQuoteProvider;
+  desktopCandleProvider?: typeof subscribeDesktopCandles;
 }
 interface Client {
   close: () => void;
@@ -20,12 +22,13 @@ type StatusEvent = Extract<MarketStreamEvent, { type: 'status' }>;
 type QuoteEvent = Extract<MarketStreamEvent, { type: 'quote' }>;
 
 /**
- * 协调可选原生报价和 CLI 备用报价，K线始终来自 CLI 原生柱。
+ * 协调桌面原生报价与独立K线；原生报价失败时才启用CLI备用报价。
  * @param symbol 当前连接证券。
  * @param send 统一事件发送函数，负责跨通道拒绝旧时间。
+ * @param desktopCandles 是否由桌面通道同步证券柱。
  * @returns 两路独立回调；状态从可用通道计算，外部异常仅产生固定提示。
  */
-function createEventRouter(symbol: string, send: (event: MarketStreamEvent) => void): {
+function createEventRouter(symbol: string, send: (event: MarketStreamEvent) => void, desktopCandles = false): {
   onBridge: (event: MarketStreamEvent) => void; onNative: (event: MarketStreamEvent) => void;
 } {
   let nativeConnected = false;
@@ -39,13 +42,16 @@ function createEventRouter(symbol: string, send: (event: MarketStreamEvent) => v
   };
   return {
     onBridge: (event): void => {
+      if (event.type === 'status' && !nativeConnected) send({ type: 'sync', symbol, channel: 'quote', mode: 'push', transport: 'cli', state: event.state });
       if (event.type === 'quote') {
         bridgeQuote = event;
         if (!nativeConnected) send(event);
       } else if (event.type === 'status') {
         bridgeStatus = event;
         if (nativeConnected) {
-          if (event.state === 'error') send({ ...event, message: `原生报价已连接；CLI 通道提示：${event.message}` });
+          send({ ...event, state: 'connected', message: event.state === 'connected'
+            ? desktopCandles ? '原生报价已连接；K线由桌面通道独立同步。' : '原生报价已连接；CLI 原生 K 线同步已连接。'
+            : `原生报价已连接；CLI 通道提示：${event.message}` });
         } else send({ ...event, message: `${nativeMessage} CLI 行情通道：${event.message}` });
       } else send(event);
     },
@@ -53,12 +59,18 @@ function createEventRouter(symbol: string, send: (event: MarketStreamEvent) => v
       try {
         parseStreamEvent(event);
         if ((event.type === 'quote' ? event.quote.symbol : event.symbol) !== symbol || event.type === 'candles') return;
+        if (event.type === 'sync') { send(event); return; }
         if (event.type === 'status') {
+          if (event.state === 'connected' || !bridgeStatus || bridgeStatus.state !== 'connected') {
+            send({ type: 'sync', symbol, channel: 'quote', mode: 'push', transport: 'desktop-ws', state: event.state });
+          }
           nativeConnected = event.state === 'connected';
           nativeMessage = nativeConnected ? '原生报价已连接。' : '原生报价暂不可用，已启用 CLI 备用报价。';
           if (nativeConnected) {
-            send(bridgeStatus?.state === 'error' ? { ...bridgeStatus, message: `${nativeMessage} ${bridgeStatus.message}` }
-              : { ...event, message: `原生报价通道：${event.message}` });
+            send({ ...event, message: bridgeStatus?.state === 'error' ? `${nativeMessage} CLI 通道提示：${bridgeStatus.message}`
+              : `原生报价通道：${event.message}` });
+          } else if (event.state === 'connecting' && !bridgeStatus) {
+            send({ ...event, message: `原生报价通道：${event.message}` });
           } else fallback(event);
         } else if (nativeConnected) send(event);
       } catch {
@@ -75,6 +87,7 @@ export class MarketStreamHub {
   private readonly clients = new Set<Client>();
   private readonly bridge: Pick<QuoteBridge, 'subscribe' | 'close'>;
   private nativeQuoteProvider?: NativeQuoteProvider;
+  private readonly desktopCandleProvider: typeof subscribeDesktopCandles;
 
   /**
    * 创建 SSE 管理器，不立即启动任何行情连接。
@@ -83,6 +96,7 @@ export class MarketStreamHub {
   constructor(options: StreamOptions = {}) {
     this.bridge = options.bridge ?? quoteBridge;
     this.nativeQuoteProvider = options.nativeQuoteProvider;
+    this.desktopCandleProvider = options.desktopCandleProvider ?? subscribeDesktopCandles;
   }
 
   /**
@@ -148,6 +162,7 @@ export class MarketStreamHub {
     let closed = false;
     let releaseBridge: (() => void) | undefined;
     let releaseNative: (() => void) | undefined;
+    let releaseCandles: (() => void) | undefined;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     let latestQuoteTime = 0;
     const cleanup = (): void => {
@@ -159,6 +174,7 @@ export class MarketStreamHub {
       response.off('finish', cleanup);
       response.off('error', abort);
       this.clients.delete(client);
+      this.release(releaseCandles);
       this.release(releaseNative);
       this.release(releaseBridge);
     };
@@ -180,12 +196,26 @@ export class MarketStreamHub {
       }
       write(`data: ${JSON.stringify(event)}\n\n`);
     };
-    const { onBridge, onNative } = createEventRouter(symbol, send);
+    const desktop = Boolean(this.nativeQuoteProvider);
+    const router = createEventRouter(symbol, send, desktop);
+    const onNative = router.onNative;
+    const onBridge = (event: MarketStreamEvent): void => {
+      if (desktop && event.type === 'candles') return;
+      router.onBridge(desktop && event.type === 'status' ? { ...event, message: `${event.message} K线通过桌面原生通道独立同步。` } : event);
+    };
     const client = { close, start: (): void => this.startClient({
-      request, response, symbol, period, cleanup, abort, write, onBridge, onNative,
+      request, response, symbol, period, cleanup, abort, write, onBridge, onNative, desktopCandles: desktop,
       setHeartbeat: (timer) => { heartbeat = timer; },
       setBridge: (release) => { releaseBridge = release; if (closed) this.release(release); },
-      setNative: (release) => { releaseNative = release; if (closed) this.release(release); },
+      setNative: (release) => {
+        releaseNative = release;
+        if (closed) this.release(release);
+        else if (desktop) {
+          const cancel = this.desktopCandleProvider(symbol, period, send);
+          releaseCandles = cancel;
+          if (closed) this.release(cancel);
+        }
+      },
       isClosed: () => closed,
     }) };
     return client;
@@ -207,7 +237,7 @@ export class MarketStreamHub {
    * @returns 无返回值；异常会清理并关闭当前客户端。
    */
   private startClient(context: {
-    request: IncomingMessage; response: ServerResponse; symbol: string; period: Period;
+    request: IncomingMessage; response: ServerResponse; symbol: string; period: Period; desktopCandles: boolean;
     cleanup: () => void; abort: () => void; write: (text: string) => void;
     onBridge: (event: MarketStreamEvent) => void; onNative: (event: MarketStreamEvent) => void;
     setHeartbeat: (timer: ReturnType<typeof setInterval>) => void;
@@ -224,12 +254,20 @@ export class MarketStreamHub {
       response.flushHeaders();
       context.write(': connected\n\n');
       if (context.isClosed()) return;
-      context.setBridge(this.bridge.subscribe(context.symbol, context.period, context.onBridge));
-      if (context.isClosed()) return;
+      let bridgeStarted = false;
+      const startBridge = (): void => {
+        if (bridgeStarted || context.isClosed()) return;
+        bridgeStarted = true;
+        context.setBridge(this.bridge.subscribe(context.symbol, context.period, context.onBridge, !context.desktopCandles));
+      };
+      const onNative = (event: MarketStreamEvent): void => {
+        context.onNative(event);
+        if (event.type === 'status' && ['error', 'reconnecting'].includes(event.state)) startBridge();
+      };
       if (this.nativeQuoteProvider) {
-        try { context.setNative(this.nativeQuoteProvider(context.symbol, context.onNative)); }
-        catch { context.onNative({ type: 'status', symbol: context.symbol, state: 'error', message: '原生通道启动失败。' }); }
-      }
+        try { context.setNative(this.nativeQuoteProvider(context.symbol, onNative)); }
+        catch { onNative({ type: 'status', symbol: context.symbol, state: 'error', message: '原生通道启动失败。' }); }
+      } else startBridge();
       if (!context.isClosed()) context.setHeartbeat(setInterval(() => context.write(': heartbeat\n\n'), HEARTBEAT_MS));
     } catch {
       console.warn('[market-stream] SSE 连接初始化失败');

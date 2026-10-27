@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { liveIntraday, normalizeIntraday } from '../server/intraday';
 import { demoIntraday } from '../server/demo';
 import { exchangeParts, exchangeTimestamp } from '../shared/intraday';
+import { nativeSession } from '../server/native-feed';
 
 /** 构造不含账户字段的真实契约样本，参数为时间和额外字段，返回CLI点。 */
 function point(time: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -81,6 +82,54 @@ test('单日读取与解析失败显式提示，边界输入验证且不泄漏�
   assert.doesNotMatch(result.warnings.join(' '), /SECRET_ACCOUNT/);
   await assert.rejects(liveIntraday('NVDA.US;whoami', 'all', 1), /证券代码/);
   await assert.rejects(liveIntraday('NVDA.US', 'all', 2 as 1), /天数/);
+});
+
+test('原生读取传递目标时段与历史日期，五日结果不依赖CLI', async () => {
+  const requested: Array<{ symbol: string; session: string; date?: string }> = [];
+  const result = await liveIntraday('AAPL.US', 'regular', 5, {
+    now: new Date('2026-10-27T16:00:00Z'),
+    nativeRequest: async (payload) => {
+      requested.push(payload);
+      const date = payload.date ?? '20261027';
+      const iso = `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}`;
+      return [point(`${iso}T14:00:00Z`)];
+    },
+  });
+  assert.deepEqual(requested[0], { symbol: 'AAPL.US', session: 'regular' });
+  assert.equal(requested[1].date, '20261026');
+  assert.ok(requested.every((payload) => payload.session === 'regular'));
+  assert.equal(result.points.length, 5);
+  assert.deepEqual(result.warnings, []);
+});
+
+test('默认入口直接调用共享原生会话，成功结果无需CLI安装', async () => {
+  const original = nativeSession.intradayCall;
+  const requested: unknown[] = [];
+  nativeSession.intradayCall = async (payload) => { requested.push(payload); return [point('2026-10-27T14:00:00Z')]; };
+  try {
+    const result = await liveIntraday('AAPL.US', 'regular', 1, { now: new Date('2026-10-27T16:00:00Z') });
+    assert.equal(result.points.length, 1);
+    assert.deepEqual(result.warnings, []);
+    assert.deepEqual(requested[0], { symbol: 'AAPL.US', session: 'regular' });
+  } finally { nativeSession.intradayCall = original; }
+});
+
+test('原生不可用停止回溯且不启动CLI，部分成功点仍保留', async () => {
+  let requests = 0;
+  const result = await liveIntraday('AAPL.US', 'all', 5, {
+    now: new Date('2026-10-27T16:00:00Z'),
+    nativeRequest: async () => {
+      requests += 1;
+      if (requests === 1) return [point('2026-10-27T14:00:00Z')];
+      throw new Error('SECRET_DESKTOP_TOKEN');
+    },
+  });
+  assert.equal(result.points.length, 1);
+  assert.equal(requests, 4);
+  assert.match(result.warnings.join(' '), /桌面原生引擎/);
+  assert.doesNotMatch(result.warnings.join(' '), /SECRET_DESKTOP_TOKEN|longbridge check/);
+  const unavailable = await liveIntraday('AAPL.US', 'regular', 1, { nativeRequest: async () => { throw new Error('engine-missing'); } });
+  assert.match(unavailable.warnings.join(' '), /2 个日期/);
 });
 
 test('分时demo确定性、五日330/390点、港股午休及明确合成标记', () => {

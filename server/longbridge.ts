@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { desktopHistory } from './desktop-candles.js';
 import { promisify } from 'node:util';
 import { signalConfirmationTime } from '../shared/review.js';
 import { exchangeParts } from '../shared/intraday.js';
@@ -78,6 +79,7 @@ export async function cli(args: string[], ttl = 60_000): Promise<unknown> {
     } catch (error) {
       const code = object(error).code;
       console.error(`[longbridge] ${args[0]} 读取失败 (${String(code ?? '响应错误')})`);
+      if (code === 'ENOENT') throw new Error('未安装 Longbridge CLI，账户及历史成交暂不可用；桌面行情仍可独立读取。');
       throw new Error(`Longbridge ${args[0]} 读取失败。请在本机运行 longbridge check 检查登录和行情权限，重试或查看服务端日志。`);
     }
   })();
@@ -85,9 +87,20 @@ export async function cli(args: string[], ttl = 60_000): Promise<unknown> {
   try { return await job; } finally { pending.delete(key); }
 }
 
-/** 读取持仓及自选；返回各字段的完整性，部分接口失败会保留明确警告。 */
-export async function liveWorkspace(): Promise<Workspace> {
-  const [positionResult, watchResult] = await Promise.allSettled([cli(['positions']), cli(['watchlist'])]);
+/** 格式化读取错误。参数：错误及功能名；返回：明确的降级警告，不将失败解释为空账户。 */
+function readWarning(error: unknown, scope: string): string {
+  console.warn(`[longbridge] ${scope}不可用，返回不完整状态`);
+  const detail = object(error).code === 'ENOENT'
+    ? '未安装 Longbridge CLI，桌面行情仍可独立读取。'
+    : error instanceof Error ? error.message : '未返回可识别的错误详情，请查看服务端日志。';
+  return `${scope}读取失败：${detail}`;
+}
+
+/** 读取持仓及自选。参数：可选CLI读取器；返回：工作区及完整性，失败时允许手工输入证券查看桌面行情。 */
+export async function liveWorkspace(request = cli): Promise<Workspace> {
+  const [positionResult, watchResult] = await Promise.allSettled([
+    Promise.resolve().then(() => request(['positions'])), Promise.resolve().then(() => request(['watchlist'])),
+  ]);
   const warnings: string[] = [];
   const securities = new Map<string, Security>();
   const positions: Position[] = [];
@@ -99,26 +112,32 @@ export async function liveWorkspace(): Promise<Workspace> {
       return symbol;
     } catch { return null; } // 自选可以包含本产品尚未支持的非港美市场。
   };
+  let positionsComplete = false;
   if (positionResult.status === 'fulfilled') {
-    for (const record of rows(positionResult.value, ['stock_list', 'positions', 'channels'])) {
-      const records = Array.isArray(record.positions) ? rows(record.positions) : [record];
-      for (const position of records) {
-        const symbol = addSecurity(position);
-        if (!symbol) continue;
-        positions.push({ symbol, quantity: number(position.quantity, 'quantity'),
-          available: number(position.available_quantity ?? position.available ?? position.quantity, 'available'),
-          costPrice: number(position.cost_price, 'cost_price'), currency: String(position.currency ?? (symbol.endsWith('.HK') ? 'HKD' : 'USD')) });
+    try {
+      for (const record of rows(positionResult.value, ['stock_list', 'positions', 'channels'])) {
+        const records = Array.isArray(record.positions) ? rows(record.positions) : [record];
+        for (const position of records) {
+          const symbol = addSecurity(position);
+          if (!symbol) continue;
+          positions.push({ symbol, quantity: number(position.quantity, 'quantity'),
+            available: number(position.available_quantity ?? position.available ?? position.quantity, 'available'),
+            costPrice: number(position.cost_price, 'cost_price'), currency: String(position.currency ?? (symbol.endsWith('.HK') ? 'HKD' : 'USD')) });
+        }
       }
-    }
-  } else warnings.push(positionResult.reason.message);
+      positionsComplete = true;
+    } catch (error) { warnings.push(readWarning(error, '持仓')); }
+  } else warnings.push(readWarning(positionResult.reason, '持仓'));
   if (watchResult.status === 'fulfilled') {
-    for (const group of rows(watchResult.value, ['groups'])) {
-      for (const security of rows(group.securities ?? [], [])) addSecurity(security);
-    }
-  } else warnings.push(watchResult.reason.message);
-  if (positionResult.status === 'rejected' && watchResult.status === 'rejected') throw new Error(warnings.join(' '));
+    try {
+      for (const group of rows(watchResult.value, ['groups'])) {
+        for (const security of rows(group.securities ?? [], [])) addSecurity(security);
+      }
+    } catch (error) { warnings.push(readWarning(error, '自选')); }
+  } else warnings.push(readWarning(watchResult.reason, '自选'));
+  if (warnings.length) warnings.push('账户数据尚不完整，可手工搜索港美证券查看桌面行情；持仓读取失败不代表没有持仓。');
   return { source: 'longbridge', fetchedAt: new Date().toISOString(), securities: [...securities.values()], positions,
-    warnings, positionsComplete: positionResult.status === 'fulfilled' };
+    warnings, positionsComplete };
 }
 
 /** 读取周期日期，参数为原始 UTC 秒和代码，返回兼容 UTC 午夜标签的交易所年月日。 */
@@ -283,14 +302,18 @@ export async function candleHistory(symbol: string, period: Period, start: strin
   return result;
 }
 
-/** 读取行情及中国时间闭开范围内成交；不支持的历史成交结构显式降级为未知。 */
-export async function liveMarket(symbol: string, period: Period, start: string, end: string): Promise<MarketData> {
+/** 行情读取器。history读取桌面原始柱，executions读取CLI成交；均可注入以隔离真实账户。 */
+interface MarketReaders { history?: typeof desktopHistory; executions?: typeof cli }
+
+/** 读取桌面行情及可选成交。参数：证券、周期、闭开日期及可选读取器；返回：行情、成交与可靠性警告。 */
+export async function liveMarket(symbol: string, period: Period, start: string, end: string, readers: MarketReaders = {}): Promise<MarketData> {
   symbol = normalizeSymbol(symbol);
   const warnings: string[] = [];
   const history = marketHistoryWindow(period, start, end);
   const [marketResult, executionResult] = await Promise.allSettled([
-    candleHistory(symbol, period, history.start, history.end),
-    cli(['order', 'executions', '--history', '--symbol', symbol, '--start', `${start}T00:00:00+08:00`, '--end', `${end}T00:00:00+08:00`]),
+    Promise.resolve().then(() => (readers.history ?? desktopHistory)(symbol, period, history.start)),
+    Promise.resolve().then(() => (readers.executions ?? cli)(['order', 'executions', '--history', '--symbol', symbol,
+      '--start', `${start}T00:00:00+08:00`, '--end', `${end}T00:00:00+08:00`])),
   ]);
   if (marketResult.status === 'rejected') throw marketResult.reason;
   const candles = normalizeCandles(marketResult.value, symbol, period);
@@ -301,8 +324,8 @@ export async function liveMarket(symbol: string, period: Period, start: string, 
     try {
       executions = normalizeExecutions(executionResult.value, symbol).filter((execution) => execution.time >= Date.parse(`${start}T00:00:00+08:00`) / 1000 && execution.time < Date.parse(`${end}T00:00:00+08:00`) / 1000);
       executionsComplete = true;
-    } catch (error) { warnings.push((error as Error).message); }
-  } else warnings.push(`${executionResult.reason.message} 美国账户的聚合订单不能代替逐笔成交，此处标记执行状态未知。`);
+    } catch (error) { warnings.push(`${readWarning(error, '历史成交')} 成交状态未知，不能据此认定没有成交。`); }
+  } else warnings.push(`${readWarning(executionResult.reason, '历史成交')} 成交状态未知，不能据此认定没有成交；聚合订单不能代替逐笔成交。`);
   if (candles.length < 200) warnings.push('历史不足 200 根，指标可供查看，但不生成已确认策略信号。');
   warnings.push('历史不复权 / 常规交易时段；拆股附近指标需人工核查。历史及成交为缓存快照；实时价格由独立订阅更新，图表同步原生常规时段K线，实时性取决于账户权限和连接状态。');
   return { source: 'longbridge', symbol, period, candles, executions, fetchedAt: new Date().toISOString(),

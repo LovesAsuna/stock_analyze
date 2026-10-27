@@ -3,6 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { demoMarket, demoWorkspace, demoIntraday } from './demo.js';
 import { liveIntraday } from './intraday.js';
+import { openIntradayStream, closeIntradayStreams } from './intraday-stream.js';
 import { liveFundamentals } from './fundamentals.js';
 import { demoFundamentals } from './demo-fundamentals.js';
 import { liveEvents } from './events.js';
@@ -17,7 +18,8 @@ import { handleChartLab } from './chart-lab.js';
 import type { Period } from '../shared/types.js';
 
 setNativeQuoteProvider(subscribeNativeQuote);
-const port = 8787;
+const port = Number(process.env.PORT ?? 8787);
+if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('PORT必须是1024至65535之间的整数');
 const production = process.argv.includes('--production');
 const dist = resolve('dist');
 let active = 0;
@@ -54,6 +56,16 @@ async function api(request: IncomingMessage, response: ServerResponse, url: URL)
   if (request.method !== 'GET') return json(response, 405, { error: '接口仅支持读取。' });
   const source = url.searchParams.get('source') ?? 'demo';
   if (!['demo', 'longbridge'].includes(source)) return json(response, 400, { error: '无效数据源。' });
+  if (url.pathname === '/api/intraday-stream') {
+    try {
+      if (source !== 'longbridge') throw new Error('实时分时仅适用于Longbridge数据源。');
+      const symbol = normalizeSymbol(url.searchParams.get('symbol'));
+      const session = url.searchParams.get('session') ?? 'regular';
+      validateIntradaySelection(session, 1);
+      openIntradayStream(request, response, symbol, session as IntradaySession);
+    } catch (error) { json(response, 400, { error: error instanceof Error ? error.message : '分时连接失败。' }); }
+    return;
+  }
   if (url.pathname === '/api/stream') {
     try {
       if (source !== 'longbridge') throw new Error('实时行情仅适用于Longbridge数据源。');
@@ -130,7 +142,7 @@ let closing: Promise<void> | null = null;
 function shutdown(): Promise<void> {
   if (closing) return closing;
   closing = (async () => {
-    closeMarketStreams();
+    closeMarketStreams(); closeIntradayStreams();
     server.close();
     server.closeAllConnections();
     try { await closeNativeSession(); }

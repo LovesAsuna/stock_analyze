@@ -4,6 +4,8 @@ const { existsSync } = require('node:fs');
 const { join, resolve } = require('node:path');
 const { normalizeNativeSymbol, parseNative, resolveCounter, publicError, withTimeout, authCodes } = require('./helpers.cjs');
 const { normalizeNativeQuote } = require('./quote.cjs');
+const { optionIdentity, findCounter, desktopGet, readCandles } = require('./candles.cjs');
+const { readIntraday } = require('./intraday.cjs');
 
 class NativeQuoteWorker {
   /** 创建可测试的只读桥接。参数：native原生导出、send事件回调；返回：新实例。 */
@@ -15,9 +17,9 @@ class NativeQuoteWorker {
     this.qrToken = null; this.authGeneration = 0; this.loggedIn = false; this.qrExpiresAt = null;
   }
 
-  /** 发送某证券状态。参数：symbol代码、state状态、message安全说明；返回：无。 */
-  status(symbol, state, message) {
-    this.send('status', { symbol, state, message: `桌面原生WS${this.loggedIn ? '本地登录会话' : '匿名'}：${message}` });
+  /** 发送某证券状态。参数：symbol代码、state状态、message安全说明、scope恢复范围；返回：无。 */
+  status(symbol, state, message, scope = 'connection') {
+    this.send('status', { symbol, state, scope, message: `桌面原生WS${this.loggedIn ? '本地登录会话' : '匿名'}：${message}` });
   }
 
   /** 广播目标状态。参数：state状态、message说明；返回：无。 */
@@ -62,10 +64,18 @@ class NativeQuoteWorker {
       const parsed = parseNative(data);
       for (const message of Array.isArray(parsed) ? parsed : [parsed]) this.onMessage(message);
     } else if (['reconnecting', 'closed', 'error'].includes(event)) {
-      this.authenticated = false; this.subscriptionGeneration += 1;
-      for (const entry of this.targets.values()) { entry.pending = false; entry.confirmed = false; entry.counter = null; }
+      this.resetSubscriptions();
       this.allStatus(event === 'error' ? 'error' : 'reconnecting', event === 'error' ? '行情连接失败' : '等待原生连接恢复并重新订阅');
       this.armDeadline();
+    }
+  }
+
+  /** 使旧异步任务失效并取消目标重试。参数：无；返回：无。 */
+  resetSubscriptions() {
+    this.authenticated = false; this.subscriptionGeneration += 1;
+    for (const entry of this.targets.values()) {
+      clearTimeout(entry.retryTimer); entry.retryTimer = null; entry.retryAttempts = 0;
+      entry.pending = false; entry.confirmed = false; entry.counter = null;
     }
   }
 
@@ -73,10 +83,12 @@ class NativeQuoteWorker {
   onMessage(message) {
     if (message.type === 'authenticated') {
       clearTimeout(this.deadline); this.authenticated = true;
+      this.send('connection', { state: 'connected' });
       for (const entry of this.targets.values()) this.activate(entry);
     } else if (message.type === 'rejected') {
-      this.authenticated = false; this.subscriptionGeneration += 1;
+      this.resetSubscriptions();
       this.allStatus('error', '行情协议认证被拒绝，请检查行情权限');
+      this.armDeadline();
     } else if (this.authenticated && /^quote\/(detail|list)$/.test(message.type)) {
       for (const entry of this.targets.values()) {
         if (!entry.counter || message.counter_id !== entry.counter) continue;
@@ -90,9 +102,30 @@ class NativeQuoteWorker {
     const next = normalizeNativeQuote(data, entry.symbol, entry.latest);
     if (!next) return false;
     entry.latest = next;
-    if (!entry.confirmed) { entry.confirmed = true; this.status(entry.symbol, 'connected', '行情认证及目标订阅已确认'); }
+    this.confirm(entry);
     this.send('quote', next.quote);
     return true;
+  }
+
+  /** 确认目标并取消局部退避。参数：entry当前目标；返回：无。 */
+  confirm(entry) {
+    clearTimeout(entry.retryTimer); entry.retryTimer = null; entry.retryAttempts = 0;
+    if (!entry.confirmed) {
+      entry.confirmed = true;
+      this.status(entry.symbol, 'connected', '行情认证及目标订阅已确认');
+    }
+  }
+
+  /** 仅重试当前证券，最多三次，不销毁共享连接。参数：entry目标；返回：无。 */
+  retryTarget(entry) {
+    if (entry.retryTimer || entry.retryAttempts >= 3) return;
+    const generation = this.generation; const epoch = this.subscriptionGeneration;
+    const delay = 4000 * (2 ** entry.retryAttempts++);
+    entry.retryTimer = setTimeout(() => {
+      entry.retryTimer = null;
+      if (this.current(entry, generation, epoch)) this.activate(entry);
+    }, delay);
+    entry.retryTimer.unref?.();
   }
 
   /** 异步查找并订阅证券。参数：entry当前目标；返回：无，失败以状态事件报告。 */
@@ -103,8 +136,14 @@ class NativeQuoteWorker {
     this.activateAsync(entry, generation, epoch).catch(error => {
       if (!this.current(entry, generation, epoch)) return;
       entry.pending = false;
+      // 有效推送已证明订阅可用，快照失败不能覆盖此确认。
+      if (entry.confirmed) {
+        this.send('log', { kind: 'info', message: '目标已由推送确认，已忽略快照失败' });
+        return;
+      }
       const known = error instanceof Error && /^桌面原生WS(?:未找到|证券搜索|返回)/.test(error.message);
-      this.status(entry.symbol, 'error', known ? error.message : publicError(error).message);
+      this.status(entry.symbol, 'error', known ? error.message : publicError(error).message, 'target');
+      this.retryTarget(entry);
     });
   }
 
@@ -112,29 +151,53 @@ class NativeQuoteWorker {
   async activateAsync(entry, generation, epoch) {
     const market = entry.symbol.slice(-2); const code = entry.symbol.slice(0, -3);
     // 原生搜索要求products字段；空数组覆盖全产品，避免按目标名称猜测股票/ETF/期权。
+    const option = optionIdentity(entry.symbol);
     const raw = await withTimeout(this.native.searchSecurities(JSON.stringify({ term: code, markets: [market], is_code_exact_match: true, products: [], limit: 100 })));
+    let counter;
+    try { counter = resolveCounter(raw, entry.symbol); }
+    catch (error) {
+      if (!option) throw error;
+      if (!this.current(entry, generation, epoch)) return;
+      counter = await findCounter(this, entry.symbol);
+    }
     if (!this.current(entry, generation, epoch)) return;
-    const counter = resolveCounter(raw, entry.symbol);
     const activeSocket = this.socket;
     entry.counter = counter;
     this.native.wsSubscribeV2.call(activeSocket, JSON.stringify([{ counter_id: counter, subtypes: 2 }]));
     const quoteBeforeSnapshot = entry.latest;
-    const response = parseNative(await withTimeout(this.native.quoteDetail.call(activeSocket, JSON.stringify({ counter_id: counter }))));
+    const response = await this.quoteSnapshot(entry, activeSocket, counter);
     if (!this.current(entry, generation, epoch)) return;
     entry.pending = false;
     if (response.code !== undefined && ![0, '0'].includes(response.code)) throw new Error('桌面原生WS返回失败的行情快照');
     const data = response.data ?? response;
     if (data.counter_id !== counter) throw new Error('桌面原生WS返回不匹配的行情快照');
-    // 推送可能先于快照；旧快照只补全缺失昨收，不能覆盖价格、时段或时间。
-    if (entry.latest !== quoteBeforeSnapshot || (entry.latest && Number(data.timestamp) < entry.latest.quote.timestamp)) {
+    const snapshot = normalizeNativeQuote(data, entry.symbol);
+    if (!snapshot) throw new Error('桌面原生WS返回无法确认订阅的行情快照');
+    // 当前代合法快照可确认连接；保留更新推送的价格、时段和时间。
+    if (entry.latest !== quoteBeforeSnapshot || (entry.latest && snapshot.quote.timestamp < entry.latest.quote.timestamp)) {
       const previousClose = Number(data.prev_close);
       if (entry.latest && entry.latest.quote.previousClose === null && previousClose > 0 && Number.isFinite(previousClose)) {
         entry.latest.fields.prev_close = previousClose; entry.latest.quote.previousClose = previousClose;
-        this.send('quote', entry.latest.quote);
       }
+      this.confirm(entry);
+      this.send('quote', entry.latest.quote);
       return;
     }
     if (!this.deliver(entry, data)) throw new Error('桌面原生WS返回无法确认订阅的行情快照');
+  }
+
+  /** 读取目标快照，期权WS失败使用桌面同版HTTP。参数：entry目标、socket当前连接、counter身份；返回：快照包装。 */
+  async quoteSnapshot(entry, socket, counter) {
+    const generation = this.generation; const epoch = this.subscriptionGeneration;
+    try {
+      const response = parseNative(await withTimeout(this.native.quoteDetail.call(socket, JSON.stringify({ counter_id: counter }))));
+      if (response.code !== undefined && ![0, '0'].includes(response.code)) throw new Error('桌面原生WS返回失败的行情快照');
+      return response;
+    } catch (error) {
+      if (!this.httpClient || entry.confirmed || !this.current(entry, generation, epoch)) throw error;
+      this.send('log', { kind: 'info', message: '报价WS请求失败，使用桌面HTTP回退' });
+      return { data: await desktopGet(this, optionIdentity(entry.symbol) ? '/v2/quote/option/detail' : '/v3/quote/stock/detail', { counter_id: counter }) };
+    }
   }
 
   /** 添加目标，仅精确代码进入搜索。参数：value证券代码；返回：排队状态。 */
@@ -142,7 +205,7 @@ class NativeQuoteWorker {
     const symbol = normalizeNativeSymbol(value);
     let entry = this.targets.get(symbol);
     if (!entry) {
-      entry = { symbol, counter: null, latest: null, pending: false, confirmed: false };
+      entry = { symbol, counter: null, latest: null, pending: false, confirmed: false, retryTimer: null, retryAttempts: 0 };
       this.targets.set(symbol, entry);
       this.status(symbol, 'connecting', '等待认证与证券精确匹配');
     }
@@ -154,6 +217,7 @@ class NativeQuoteWorker {
   unsubscribe(value) {
     const symbol = normalizeNativeSymbol(value); const entry = this.targets.get(symbol);
     this.targets.delete(symbol);
+    clearTimeout(entry?.retryTimer);
     if (entry?.counter && this.socket) this.native.wsUnsubscribeV2.call(this.socket, JSON.stringify([{ counter_id: entry.counter, subtypes: 2 }]));
     return { removed: true };
   }
@@ -224,7 +288,7 @@ class NativeQuoteWorker {
 
   /** 关闭子进程自有连接。参数：无；返回：无。 */
   close() {
-    clearTimeout(this.deadline); this.generation += 1; this.authenticated = false;
+    clearTimeout(this.deadline); this.generation += 1; this.resetSubscriptions();
     this.authGeneration += 1; this.qrToken = null; this.qrExpiresAt = null;
     const socket = this.socket; this.socket = null;
     if (socket) this.native.wsClose.call(socket);
@@ -262,6 +326,8 @@ async function main() {
       if (message.method === 'connect') result = worker.connect();
       else if (message.method === 'subscribe') result = worker.subscribe(message.payload?.symbol);
       else if (message.method === 'unsubscribe') result = worker.unsubscribe(message.payload?.symbol);
+      else if (message.method === 'candles') result = await readCandles(worker, message.payload);
+      else if (message.method === 'intraday') result = await readIntraday(worker, message.payload);
       else if (message.method === 'qr-create') result = await worker.createQr();
       else if (message.method === 'qr-poll') result = await worker.pollQr();
       else throw new Error('不支持的原生行情请求');

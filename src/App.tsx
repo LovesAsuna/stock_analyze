@@ -9,6 +9,7 @@ import { LongbridgeLogin } from './LongbridgeLogin';
 import { OriginalChartLab } from './OriginalChartLab';
 import { MarketTimeframes, type ChartView } from './MarketTimeframes';
 import { IntradayView } from './IntradayView';
+import { useIntraday } from './useIntraday';
 import { WatchlistPanel } from './WatchlistPanel';
 import type { IntradaySession } from '../shared/intraday';
 import { PlanToolbar, StrategyWorkbench } from './StrategyWorkbench';
@@ -79,6 +80,7 @@ export default function App() {
   const workspaceState = useWorkspace(source, refresh);
   const { data: snapshot, error, loading } = useMarket(source, security.symbol, period, range, refresh);
   const live = useRealtimeMarket(source, security.symbol, period);
+  const intradayState = useIntraday(source, security.symbol, session, view === 'five-day' ? 5 : 1, view !== 'candles', refresh);
   const { data, error: syncError } = useLiveMarketData(snapshot, live);
   const refreshMarket = useCallback(() => setRefresh((value) => value + 1), []);
   const strategy = useStrategyWorkspace({ data: view === 'candles' ? data : null, symbol: security.symbol, source, period, config, range, loading, refresh: refreshMarket });
@@ -115,8 +117,8 @@ export default function App() {
             <SecurityOverview security={security} description={`${security.market === 'HK' ? '香港市场 · HKD' : '美国市场 · USD'} · ${view === 'candles' ? `${PERIOD_LABELS[period]} · 常规交易时段 · 不复权` : '分时价格 · 所选交易时段'}`} price={liveQuote?.price ?? latest?.close} change={change} changeLabel={liveQuote ? liveQuote.previousClose ? '较昨收' : '昨收待同步' : '较上一根'} sessionLabel={liveQuote ? ({ regular: '常规时段', pre: '盘前', post: '盘后', overnight: '夜盘', unknown: '时段待确认' })[liveQuote.session] : undefined} candle={view === 'candles' ? latest : undefined} />
             <div className="chart-toolbar"><span className="chart-context">{view === 'candles' ? 'K 线 · 常规时段' : view === 'five-day' ? '5 日分时' : '分时行情'}</span>
               <EventCenter source={source} scope="security" symbol={security.symbol} /><OriginalChartLab /><button className="button compact" onClick={() => setSettings(true)}><Settings2 size={14} />策略参数</button><button className="icon-button" aria-label="刷新行情" disabled={loading || workspaceState.loading} onClick={() => setRefresh((value) => value + 1)}>{loading ? <LoaderCircle size={16} className="spinner" /> : <RefreshCw size={16} />}</button></div>
-            {source === 'longbridge' && <RealtimeStatus live={live} symbol={security.symbol} period={period} error={syncError} intraday={view !== 'candles'} />}
-            {view !== 'candles' ? <IntradayView key={`${source}:${security.symbol}:${session}:${view}:${refresh}`} source={source} symbol={security.symbol} session={session} days={view === 'five-day' ? 5 : 1} footer={timeframes} /> : <>
+            {source === 'longbridge' && <RealtimeStatus live={live} symbol={security.symbol} period={period} error={syncError} intraday={view !== 'candles'} intradaySync={intradayState.sync} />}
+            {view !== 'candles' ? <IntradayView key={`${source}:${security.symbol}:${session}:${view}:${refresh}`} source={source} session={session} days={view === 'five-day' ? 5 : 1} state={intradayState} footer={timeframes} /> : <>
             <RangeControls range={range} preset={preset} onChange={(next, nextPreset) => { setRange(next); setPreset(nextPreset); setSelectedTime(null); }} source={source} />
             <PlanToolbar plan={strategy.plan} saved={Boolean(strategy.saved)} picking={strategy.picking} onPick={strategy.setPicking} onEdit={strategy.edit} />
             {data ? <div className={loading ? 'chart-loading' : ''}><Suspense fallback={<div className="chart-placeholder">加载交互图表…</div>}><StockChart candles={data.candles} indicators={indicators} signals={signals} executions={data.executions} symbol={security.symbol} period={period} layers={layers} oscillator={oscillator} selectedTime={selectedTime} costPrice={position?.costPrice} onSelect={onSelect} plan={strategy.plan} backtest={strategy.result} pickingPrice={Boolean(strategy.picking)} onPickPrice={strategy.pickPrice} footer={timeframes} controls={chartControls} /></Suspense></div>
@@ -131,7 +133,7 @@ export default function App() {
         {view === 'candles' && data && <ExecutionReview key={`${source}-${security.symbol}-${period}-${range.start}-${range.end}`} data={data} signals={signals} onSelect={onSelect} />}
         {view === 'candles' && data && <DailyReview data={data} indicators={indicators} review={review} start={range.start} end={range.end} onSelect={onSelect} />}
         {view === 'candles' && data && <DataTable candles={data.candles} points={indicators} symbol={security.symbol} period={period} />}
-        <details className="method-details"><summary>数据状态与策略说明</summary><div><p>图表、历史验证与成交核对统一使用当前交易计划的规则及指标参数。未保存时显示趋势跟随模板；回测箭头是历史模拟，不证明当时应当交易。计划保存在本机浏览器，按来源、标的和周期隔离。</p><p>日线在标准收盘后确认；半日市可能延迟确认。SAR 使用长历史，软件初始化不同仍可能有偏差。期权希腊值、时间价值和跨证券历史仓位重建尚未纳入。</p>{warnings.map((warning) => <p key={warning}>{warning}</p>)}<p>数据更新时间：{data?.fetchedAt ? new Date(data.fetchedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '—'}（中国时间）。历史及成交快照刷新遵循服务端 60 秒缓存；实时价格由上游 WebSocket 推送，K线图使用每5秒同步的原生常规时段K线，未收盘柱不触发已确认策略信号；分时图每15秒读取独立快照。</p></div></details>
+        <details className="method-details"><summary>数据状态与策略说明</summary><div><p>图表、历史验证与成交核对统一使用当前交易计划的规则及指标参数。未保存时显示趋势跟随模板；回测箭头是历史模拟，不证明当时应当交易。计划保存在本机浏览器，按来源、标的和周期隔离。</p><p>日线在标准收盘后确认；半日市可能延迟确认。SAR 使用长历史，软件初始化不同仍可能有偏差。期权希腊值、时间价值和跨证券历史仓位重建尚未纳入。</p>{warnings.map((warning) => <p key={warning}>{warning}</p>)}<p>数据更新时间：{data?.fetchedAt ? new Date(data.fetchedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '—'}（中国时间）。历史成交按服务端缓存刷新；报价由上游推送，K线和当前分时在报价变化时立即读取真实快照，分时历史每60秒补齐。当前来源、更新方式及恢复状态以上方行情状态为准；未收盘柱不触发已确认策略信号。</p></div></details>
       </main>
       <footer className="footer"><span>观势 Market Lens <span className="footer-divider">/</span> 从信号到执行</span><span>数据：Longbridge · 图表：<a href="https://www.tradingview.com/" target="_blank" rel="noreferrer">TradingView Lightweight Charts™</a></span></footer>
     </div>

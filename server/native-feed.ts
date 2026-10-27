@@ -5,10 +5,10 @@ const require = createRequire(import.meta.url);
 const { EngineClient } = require('./native/engine-client.cjs') as { EngineClient: new () => NativeEngine };
 const { normalizeNativeSymbol } = require('./native/helpers.cjs') as { normalizeNativeSymbol: (value: unknown) => string };
 type Listener = (event: MarketStreamEvent) => void;
-type NativeStatus = { symbol: string; state: StreamState; message: string };
+type NativeStatus = { symbol: string; state: StreamState; message: string; scope?: 'connection' | 'target' };
 export interface NativeEngine {
   on(event: string, listener: (value: any) => void): unknown;
-  call(method: 'connect' | 'subscribe' | 'unsubscribe' | 'qr-create' | 'qr-poll', payload?: { symbol: string }): Promise<any>;
+  call(method: 'connect' | 'subscribe' | 'unsubscribe' | 'qr-create' | 'qr-poll' | 'candles' | 'intraday', payload?: { symbol: string; period?: string; count?: number; timestamp?: string; session?: string; date?: string; withTransport?: boolean }): Promise<any>;
   stop(): Promise<void>;
 }
 interface Target {
@@ -24,18 +24,26 @@ export class NativeFeed {
   private nextId = 0;
   private operations = Promise.resolve();
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private stableTimer: ReturnType<typeof setTimeout> | null = null;
   private attempts = 0;
   private recovering = false;
   private pinned = false;
   private closed = false;
   private authEpoch = 0;
+  private candleRequests = 0;
   private readonly resets = new Set<() => void>();
 
   /** 绑定唯一引擎。参数：engine隔离客户端；返回：新实例。 */
   constructor(private readonly engine: NativeEngine) {
     engine.on('status', (value: NativeStatus) => this.onStatus(value));
     engine.on('quote', (value: RealtimeQuote) => this.onQuote(value));
-    engine.on('state', () => {
+    // 协议认证恢复后，证券解析失败不能延续旧的连接级重启计时。
+    engine.on('connection', (value: { state?: string }) => {
+      if (value?.state === 'connected') this.cancelRecovery();
+    });
+    engine.on('state', (value: { state?: string } | undefined) => {
+      // 主动stop已在开始时通过reset使旧任务失效；结束事件不能再次取消排队的新请求。
+      if (value?.state === 'closed') return;
       this.invalidateAuth();
       if (!this.recovering) this.fail('隔离行情进程已停止');
     });
@@ -67,6 +75,7 @@ export class NativeFeed {
   private fail(message: string): void {
     if (!this.targets.size) return;
     console.error(`[native-feed] ${message}`);
+    this.cancelStable();
     for (const [symbol, target] of this.targets) {
       target.status = { symbol, state: 'error', message: `桌面原生WS匿名：${message}` };
       target.quote = null;
@@ -84,12 +93,18 @@ export class NativeFeed {
   private onStatus(value: NativeStatus): void {
     const target = this.targets.get(value?.symbol);
     if (!target || !['connecting', 'connected', 'reconnecting', 'error'].includes(value.state)) return;
-    target.status = value;
-    if (value.state !== 'connected') target.quote = null;
-    this.publish(target, { type: 'status', ...value });
+    target.status = { symbol: value.symbol, state: value.state, message: value.message };
+    if (value.state !== 'connected') { target.quote = null; this.cancelStable(); }
+    // scope仅用于服务端恢复决策，不进入公共SSE协议。
+    const { symbol, state, message } = value;
+    this.publish(target, { type: 'status', symbol, state, message });
     if (value.state === 'connected' && [...this.targets.values()].every((entry) => entry.status.state === 'connected')) {
-      this.cancelRecovery(); this.attempts = 0;
-    } else if (['error', 'reconnecting'].includes(value.state) && !/未找到|多个精确匹配/.test(value.message)) {
+      this.cancelRecovery();
+      if (!this.stableTimer) {
+        this.stableTimer = setTimeout(() => { this.stableTimer = null; this.attempts = 0; }, 30000);
+        this.stableTimer.unref?.();
+      }
+    } else if (value.scope !== 'target' && ['error', 'reconnecting'].includes(value.state) && !/未找到|多个精确匹配/.test(value.message)) {
       this.scheduleRecovery();
     }
   }
@@ -101,6 +116,12 @@ export class NativeFeed {
       !Number.isFinite(quote.price) || quote.price <= 0 || (target.quote && quote.timestamp < target.quote.timestamp)) return;
     target.quote = quote;
     this.publish(target, { type: 'quote', quote });
+  }
+
+  /** 取消稳定窗口，避免短暂确认无限重置恢复预算。参数：无；返回：无。 */
+  private cancelStable(): void {
+    if (this.stableTimer) clearTimeout(this.stableTimer);
+    this.stableTimer = null;
   }
 
   /** 取消待执行恢复。参数：无；返回：无。 */
@@ -125,7 +146,7 @@ export class NativeFeed {
   /** 销毁故障会话并重放所有当前目标。参数：无；返回：Promise<void>。 */
   private async recover(): Promise<void> {
     if (this.closed || !this.targets.size) return;
-    this.recovering = true;
+    this.recovering = true; this.cancelStable();
     try {
       this.invalidateAuth();
       await this.engine.stop(); this.submitted.clear();
@@ -162,9 +183,42 @@ export class NativeFeed {
     return this.engine.call(method);
   }
 
+  /** 执行一页原生K线。参数：payload代码、周期、数量及可选时间戳；返回：当前会话响应。 */
+  async candleCall(payload: { symbol: string; period: string; count: number; timestamp?: string; withTransport?: boolean }): Promise<any> {
+    return this.withCandleSession(() => this.engine.call('candles', payload));
+  }
+
+  /** 读取桌面分时并保留共享会话。参数：证券、时段及可选YYYYMMDD日期；返回：原始分时点。 */
+  async intradayCall(payload: { symbol: string; session: string; date?: string; withTransport?: boolean }): Promise<any> {
+    return this.withCandleSession(() => this.engine.call('intraday', payload));
+  }
+
+  /** 在完整分页期间持有共享会话，避免页间空隙回收。参数：read只读任务；返回：当前会话任务结果。 */
+  async withCandleSession<Result>(read: () => Promise<Result>): Promise<Result> {
+    const epoch = this.authEpoch;
+    this.candleRequests += 1;
+    try {
+      await this.operations;
+      if (this.closed || epoch !== this.authEpoch) throw new Error('原生K线会话已取消');
+      const result = await read();
+      if (this.closed || epoch !== this.authEpoch) throw new Error('原生K线会话已取消');
+      return result;
+    } finally {
+      this.candleRequests -= 1;
+      if (!this.closed && !this.targets.size && !this.pinned && !this.candleRequests) {
+        this.enqueue(async () => {
+          // 排队期间可能新增行情目标、登录固定或K线请求，执行时必须重新确认引用。
+          if (!this.closed && !this.targets.size && !this.pinned && !this.candleRequests) {
+            this.submitted.clear(); await this.engine.stop();
+          }
+        });
+      }
+    }
+  }
+
   /** 销毁当前身份并在同一操作队列恢复匿名目标。参数：无；返回：Promise<void>。 */
   async resetSession(): Promise<void> {
-    this.cancelRecovery(); this.recovering = true; this.invalidateAuth();
+    this.cancelRecovery(); this.cancelStable(); this.recovering = true; this.invalidateAuth();
     // 先打断可能仍在原生层执行的扫码轮询，不能等它自行返回后再销毁。
     const stopping = this.engine.stop();
     const reset = this.operations.then(async () => {
@@ -183,7 +237,7 @@ export class NativeFeed {
 
   /** 关闭身份和行情生命周期，不再自动恢复。参数：无；返回：Promise<void>。 */
   async close(): Promise<void> {
-    this.closed = true; this.cancelRecovery(); this.invalidateAuth();
+    this.closed = true; this.cancelRecovery(); this.cancelStable(); this.invalidateAuth();
     await this.engine.stop(); await this.operations;
     this.targets.clear(); this.submitted.clear();
   }
@@ -197,7 +251,7 @@ export class NativeFeed {
     if (!target) {
       target = { listeners: new Map(), quote: null,
         status: { symbol, state: 'connecting', message: '桌面原生WS匿名：正在建立隔离行情订阅' } };
-      this.targets.set(symbol, target);
+      this.targets.set(symbol, target); this.cancelStable();
       const entry = target;
       this.enqueue(async () => {
         if (this.closed || this.targets.get(symbol) !== entry) return;
@@ -216,11 +270,11 @@ export class NativeFeed {
       disposed = true; entry.listeners.delete(id);
       if (entry.listeners.size || this.targets.get(symbol) !== entry) return;
       this.targets.delete(symbol);
-      if (!this.targets.size) { this.cancelRecovery(); this.attempts = 0; }
+      if (!this.targets.size) { this.cancelRecovery(); this.cancelStable(); this.attempts = 0; }
       this.enqueue(async () => {
         // 旧取消排在新一代订阅之前，不能跳过原生目标的删除。
         try { if (this.submitted.delete(symbol)) await this.engine.call('unsubscribe', { symbol }); }
-        finally { if (!this.targets.size && !this.pinned) { this.submitted.clear(); await this.engine.stop(); } }
+        finally { if (!this.targets.size && !this.pinned && !this.candleRequests) { this.submitted.clear(); await this.engine.stop(); } }
       });
     };
   }
