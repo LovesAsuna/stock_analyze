@@ -296,18 +296,29 @@ class NativeQuoteWorker {
 
 /** 仅在独立启动入口加载已安装引擎。参数：无；返回：初始化后的原生导出。 */
 async function initializeNative() {
-  const isolation = process.env.LB_ENGINE_ISOLATION;
-  if (!isolation || resolve(process.env.APPDATA || '') !== resolve(join(isolation, 'AppData', 'Roaming'))) throw new Error('原生行情必须使用隔离目录');
-  const installation = require('./desktop-installation.cjs').resolveDesktopInstallation();
-  const native = require(installation.addonPath);
-  require('./native-compat-timestamp.cjs').installDesktopTimestamp(native, installation.asarPath);
-  native.initEngine(JSON.stringify({ app_id: 'global.longbridge.app.desktop', env: 'prod', version: '2.38.18', build: 'c51f69d8', language: 'zh-CN', enable_sentry: false, beacon: { type: 'noop' } }));
-  const client = native.httpNew(JSON.stringify({ base_url: 'https://api-gl.lbkrs.com', headers: {}, http2: false, doh: false }));
-  let hasSession = false;
-  try { hasSession = Boolean(await native.httpGetSession.call(client, 'token')); }
-  catch (error) { if (String(error) !== 'not found') throw new Error('无法检查隔离会话'); }
-  if (hasSession) throw new Error('匿名行情隔离会话含有登录态，已拒绝连接');
-  return { native, client };
+  const { startupFailure } = require('./startup-errors.cjs');
+  let stage = 'ISOLATION';
+  try {
+    const isolation = process.env.LB_ENGINE_ISOLATION;
+    if (!isolation || resolve(process.env.APPDATA || '') !== resolve(join(isolation, 'AppData', 'Roaming')) ||
+      resolve(process.env.HOME || '') !== resolve(isolation)) throw new Error('原生行情必须使用隔离目录');
+    stage = 'INSTALL_MISSING';
+    const installation = require('./desktop-installation.cjs').resolveDesktopInstallation();
+    stage = 'NATIVE_LOAD';
+    const native = require(installation.addonPath);
+    stage = 'TIMESTAMP_COMPAT';
+    require('./native-compat-timestamp.cjs').installDesktopTimestamp(native, installation.asarPath);
+    stage = 'ENGINE_INIT';
+    native.initEngine(JSON.stringify({ app_id: 'global.longbridge.app.desktop', env: 'prod', version: '2.38.18', build: 'c51f69d8', language: 'zh-CN', enable_sentry: false, beacon: { type: 'noop' } }));
+    stage = 'HTTP_INIT';
+    const client = native.httpNew(JSON.stringify({ base_url: 'https://api-gl.lbkrs.com', headers: {}, http2: false, doh: false }));
+    stage = 'SESSION_CHECK';
+    let hasSession = false;
+    try { hasSession = Boolean(await native.httpGetSession.call(client, 'token')); }
+    catch (error) { if (String(error) !== 'not found') throw new Error('无法检查隔离会话'); }
+    if (hasSession) throw new Error('匿名行情隔离会话含有登录态，已拒绝连接');
+    return { native, client };
+  } catch (error) { throw startupFailure(stage, error); }
 }
 
 /** 启动受限IPC循环。参数：无；返回：Promise<void>。 */
@@ -337,8 +348,9 @@ async function main() {
   send('ready', { isolated: true });
 }
 
-if (require.main === module) main().catch(() => {
-  if (process.connected) process.send({ event: 'fatal', data: { message: '桌面原生WS匿名引擎初始化失败，请检查安装目录与版本' } });
-  process.exit(1);
+if (require.main === module) main().catch(error => {
+  const diagnostic = require('./startup-errors.cjs').readStartupFailure(error);
+  if (process.connected) process.send({ event: 'fatal', data: { code: diagnostic.code } }, () => process.exit(1));
+  else process.exit(1);
 });
 module.exports = { NativeQuoteWorker };

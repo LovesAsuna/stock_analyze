@@ -4,6 +4,10 @@ import type { MarketStreamEvent, RealtimeQuote, StreamState } from '../shared/re
 const require = createRequire(import.meta.url);
 const { EngineClient } = require('./native/engine-client.cjs') as { EngineClient: new () => NativeEngine };
 const { normalizeNativeSymbol } = require('./native/helpers.cjs') as { normalizeNativeSymbol: (value: unknown) => string };
+const { readStartupFailure, isStartupFailure } = require('./native/startup-errors.cjs') as {
+  readStartupFailure: (value: unknown) => Error;
+  isStartupFailure: (value: unknown) => boolean;
+};
 type Listener = (event: MarketStreamEvent) => void;
 type NativeStatus = { symbol: string; state: StreamState; message: string; scope?: 'connection' | 'target' };
 export interface NativeEngine {
@@ -48,7 +52,7 @@ export class NativeFeed {
       if (!this.recovering) this.fail('隔离行情进程已停止');
     });
     engine.on('reset', () => this.invalidateAuth());
-    engine.on('fatal', () => this.fail('本机原生引擎初始化失败，请检查安装目录与版本'));
+    engine.on('fatal', (value: unknown) => this.fail(readStartupFailure(value).message));
     engine.on('log', (value: { kind?: string; category?: string; message?: string }) => {
       if (typeof value?.message === 'string' && /^AUTH_(CREATE|POLL)_(RESPONSE|FAILED) \{(?:"(?:code|httpStatus)":\d{1,9},?)*\}$/.test(value.message)) {
         console.info(`[native-auth] ${value.message}`); return;
@@ -86,7 +90,8 @@ export class NativeFeed {
 
   /** 串行处理进程生命周期和目标变更。参数：job异步任务；返回：无。 */
   private enqueue(job: () => Promise<void>): void {
-    this.operations = this.operations.then(job).catch(() => this.fail('引擎操作失败，请检查桌面版本、网络和行情权限'));
+    this.operations = this.operations.then(job).catch(error => this.fail(isStartupFailure(error)
+      ? readStartupFailure(error).message : '引擎操作失败，请检查桌面版本、网络和行情权限'));
   }
 
   /** 处理目标状态。参数：value原生安全状态；返回：无。 */

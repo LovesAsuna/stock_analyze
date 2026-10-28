@@ -5,11 +5,12 @@ const { fork } = require('node:child_process');
 const { mkdtemp, mkdir, rm } = require('node:fs/promises');
 const { join } = require('node:path');
 const { tmpdir } = require('node:os');
+const { readStartupFailure } = require('./startup-errors.cjs');
 
 /** 移除继承的行情凭据环境。参数：无；返回：独立匿名子进程环境。 */
 function anonymousEnvironment() {
   // Windows 环境变量名不区分大小写；清除两种运行时的预加载选项及待覆盖的隔离目录。
-  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(?:NODE_OPTIONS|NODE_PATH|BUN_OPTIONS|APPDATA|LOCALAPPDATA|USERPROFILE)$/i.test(key)
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(?:NODE_OPTIONS|NODE_PATH|BUN_OPTIONS|APPDATA|LOCALAPPDATA|USERPROFILE|HOME|XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_CACHE_HOME)$/i.test(key)
     && !/(?:LONG(?:BRIDGE|PORT)|^LB_).*(?:TOKEN|SECRET|KEY|SESSION|AUTH)/i.test(key)));
 }
 
@@ -47,14 +48,19 @@ class EngineClient extends EventEmitter {
       this.directory = run.directory;
       const roaming = join(run.directory, 'AppData', 'Roaming');
       const local = join(run.directory, 'AppData', 'Local');
-      await Promise.all([mkdir(roaming, { recursive: true }), mkdir(local, { recursive: true })]);
+      const config = join(run.directory, '.config');
+      const data = join(run.directory, '.local', 'share');
+      const cache = join(run.directory, '.cache');
+      const applicationSupport = join(run.directory, 'Library', 'Application Support');
+      await Promise.all([roaming, local, config, data, cache, applicationSupport].map(directory => mkdir(directory, { recursive: true })));
       if (run.cancelled) throw new Error('行情引擎启动已取消');
       const child = fork(join(__dirname, 'worker.cjs'), [], {
         cwd: run.directory,
         // 明确沿用 Bun 宿主；本机已验证原生 addon 的初始化、IPC 与退出清理。
         execPath: process.execPath,
         execArgv: [],
-        env: { ...anonymousEnvironment(), LB_ENGINE_ISOLATION: run.directory, APPDATA: roaming, LOCALAPPDATA: local, USERPROFILE: run.directory },
+        env: { ...anonymousEnvironment(), LB_ENGINE_ISOLATION: run.directory, APPDATA: roaming, LOCALAPPDATA: local, USERPROFILE: run.directory,
+          HOME: run.directory, XDG_CONFIG_HOME: config, XDG_DATA_HOME: data, XDG_CACHE_HOME: cache },
         stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
       });
       run.child = child; this.child = child;
@@ -90,7 +96,12 @@ class EngineClient extends EventEmitter {
       run.child.on('message', message => {
         if (this.run !== run || run.cancelled || !message || typeof message !== 'object') return;
         if (message.event === 'ready') { clearTimeout(timer); resolve(); }
-        if (message.event === 'fatal') { clearTimeout(timer); reject(new Error('行情引擎初始化失败')); }
+        if (message.event === 'fatal') {
+          clearTimeout(timer);
+          const error = readStartupFailure(message.data);
+          run.startupError = error;
+          reject(error);
+        }
         this.receive(message);
       });
       run.child.once('error', () => { clearTimeout(timer); reject(new Error('无法启动行情引擎子进程')); });
@@ -103,7 +114,7 @@ class EngineClient extends EventEmitter {
 
         this.rejectPending('行情引擎已停止，请重试或检查桌面应用版本');
         if (!run.cancelled) {
-          this.emit('state', { state: 'error', authenticated: false, message: '隔离行情进程已停止' });
+          if (!run.startupError) this.emit('state', { state: 'error', authenticated: false, message: '隔离行情进程已停止' });
           this.stopping = this.cleanup(run).catch(() => this.emit('log', { kind: 'error', message: '隔离会话目录清理失败，请检查临时目录权限' })).finally(() => { this.starting = null; this.stopping = null; });
         }
       });
