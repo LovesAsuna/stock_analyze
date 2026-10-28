@@ -7,15 +7,14 @@
  */
 const { openSync, readSync, closeSync } = require('node:fs');
 const { createHash } = require('node:crypto');
-const { join } = require('node:path');
-const desktopAsar = join(process.env.LONGBRIDGE_INSTALL_DIR || 'C:/Program Files (x86)/Longbridge Pro', 'resources', 'app.asar');
+const { resolveDesktopInstallation } = require('./desktop-installation.cjs');
 
 /**
  * 从已安装 ASAR 中读取指定主进程成员。
- * 参数：无；返回：主进程源字符串；格式、长度或读取不完整时抛出错误。
+ * 参数：asarPath为同版桌面资源；返回：主进程源字符串；格式、长度或读取不完整时抛出错误。
  */
-function readDesktopMain() {
-  const descriptor = openSync(desktopAsar, 'r');
+function readDesktopMain(asarPath) {
+  const descriptor = openSync(asarPath, 'r');
   try {
     const prefix = Buffer.alloc(16);
     if (readSync(descriptor, prefix, 0, 16, 0) !== 16) throw new Error('桌面 ASAR 头部不完整');
@@ -38,12 +37,12 @@ function readDesktopMain() {
 
 /**
  * 安装桌面原有的时间戳桥接；不生成 token、不改变认证结果。
- * 参数：native 为此安装包对应的原生导出对象。
+ * 参数：native为原生导出对象，asarPath为同版资源路径，省略时自动发现安装。
  * 返回：恢复原属性的函数；包装约定不匹配时立即抛错，禁止猜测降级。
  */
-function installDesktopTimestamp(native) {
+function installDesktopTimestamp(native, asarPath) {
   if (!native || typeof native.sha256 !== 'function') throw new TypeError('需要当前桌面引擎的 sha256 导出');
-  const source = readDesktopMain();
+  const source = readDesktopMain(asarPath ?? resolveDesktopInstallation().asarPath);
   // 只接受已经静态验证的完整公式，避免升级后误取其它代码或常量。
   const pattern = /var W="([a-f0-9]{32})",Z=function\(A,e\)\{var g=\[W,A,e\]\.join\("\|"\);return n\.qn\.sha256\(g\)\};console\.timeStamp=Z;/g;
   const matches = [...source.matchAll(pattern)];

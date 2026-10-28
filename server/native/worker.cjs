@@ -1,6 +1,5 @@
 'use strict';
 /** 独立桌面行情及扫码会话子进程；凭据不离开进程，不提供交易或账户查询接口。 */
-const { existsSync } = require('node:fs');
 const { join, resolve } = require('node:path');
 const { normalizeNativeSymbol, parseNative, resolveCounter, publicError, withTimeout, authCodes } = require('./helpers.cjs');
 const { normalizeNativeQuote } = require('./quote.cjs');
@@ -299,11 +298,9 @@ class NativeQuoteWorker {
 async function initializeNative() {
   const isolation = process.env.LB_ENGINE_ISOLATION;
   if (!isolation || resolve(process.env.APPDATA || '') !== resolve(join(isolation, 'AppData', 'Roaming'))) throw new Error('原生行情必须使用隔离目录');
-  const installRoot = process.env.LONGBRIDGE_INSTALL_DIR || 'C:/Program Files (x86)/Longbridge Pro';
-  const addonPath = join(installRoot, 'resources/app.asar.unpacked/node_modules/@lb-public/engine-neon/addons/win/x64/engine_neon.node');
-  if (!existsSync(addonPath)) throw new Error('未找到本机Longbridge Pro x64引擎');
-  const native = require(addonPath);
-  require('./native-compat-timestamp.cjs').installDesktopTimestamp(native);
+  const installation = require('./desktop-installation.cjs').resolveDesktopInstallation();
+  const native = require(installation.addonPath);
+  require('./native-compat-timestamp.cjs').installDesktopTimestamp(native, installation.asarPath);
   native.initEngine(JSON.stringify({ app_id: 'global.longbridge.app.desktop', env: 'prod', version: '2.38.18', build: 'c51f69d8', language: 'zh-CN', enable_sentry: false, beacon: { type: 'noop' } }));
   const client = native.httpNew(JSON.stringify({ base_url: 'https://api-gl.lbkrs.com', headers: {}, http2: false, doh: false }));
   let hasSession = false;
