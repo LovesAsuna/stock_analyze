@@ -1,6 +1,6 @@
 'use strict';
 const { normalizeNativeSymbol, parseNative, withTimeout } = require('./helpers.cjs');
-const { desktopGet, findCounter, ready } = require('./candles.cjs');
+const { desktopGet, findCounter, ready } = require('./market-access.cjs');
 
 // 安装版 TimesharesType（menu-8d4ea620.js:116050），并经隔离股票分时验证。
 const SESSIONS = { regular: 0, pre: 2, post: 3, overnight: 4, all: 100 };

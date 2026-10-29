@@ -57,6 +57,9 @@ export class NativeFeed {
       if (typeof value?.message === 'string' && /^AUTH_(CREATE|POLL)_(RESPONSE|FAILED) \{(?:"(?:code|httpStatus)":\d{1,9},?)*\}$/.test(value.message)) {
         console.info(`[native-auth] ${value.message}`); return;
       }
+      if (value?.kind === 'info' && value.category === 'ENDPOINT_SELECTED' && ['hk', 'bj'].includes(value.message ?? '')) {
+        console.info(`[native-feed] 已自动选择桌面行情端点（${value.message}）`); return;
+      }
       if (value?.kind !== 'error') return;
       const category = ['NODE_LOADER', 'MODULE_MISSING', 'NATIVE_ABI', 'NATIVE_RUNTIME', 'CHILD_STDERR'].includes(value.category ?? '')
         ? value.category : 'CLEANUP_OR_TRANSPORT';

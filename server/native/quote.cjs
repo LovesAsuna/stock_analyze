@@ -47,4 +47,21 @@ function normalizeNativeQuote(value, symbol, previous = null) {
   return { fields, quote: { symbol, timestamp, price, previousClose: fields.prev_close ?? null, session } };
 }
 
-module.exports = { normalizeNativeQuote, tradeSession, numeric };
+/** 将快照应用到既有报价，保留期间收到的推送及旧快照可补齐昨收的规则。参数：data快照字段、symbol证券、previous内部报价、preferPrevious是否已收到推送；返回：合并后的内部报价。 */
+function mergeNativeQuoteSnapshot(data, symbol, previous, preferPrevious = false) {
+  const snapshot = normalizeNativeQuote(data, symbol);
+  if (!snapshot) throw new Error('桌面原生WS返回无法确认订阅的行情快照');
+  if (preferPrevious || (previous && snapshot.quote.timestamp < previous.quote.timestamp)) {
+    const previousClose = Number(data.prev_close);
+    // 保留已发布报价的对象身份，只补缺失的昨收；不覆盖更新的价格、时段和时间。
+    if (previous && previous.quote.previousClose === null && previousClose > 0 && Number.isFinite(previousClose)) {
+      previous.fields.prev_close = previousClose; previous.quote.previousClose = previousClose;
+    }
+    return previous;
+  }
+  const result = normalizeNativeQuote(data, symbol, previous);
+  if (!result) throw new Error('桌面原生WS返回无法确认订阅的行情快照');
+  return result;
+}
+
+module.exports = { normalizeNativeQuote, mergeNativeQuoteSnapshot, tradeSession, numeric };

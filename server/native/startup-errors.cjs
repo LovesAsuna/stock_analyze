@@ -14,6 +14,8 @@ const messages = {
   NATIVE_LOAD: '原生模块加载失败，请核对桌面版本、运行时及架构兼容性',
   TIMESTAMP_COMPAT: '当前桌面 app.asar 的 timeStamp 桥接格式或算法不兼容，需要核对该桌面版本',
   ENGINE_INIT: '原生模块已加载，但引擎初始化失败',
+  ENDPOINT_CONFIG: '当前桌面 app.asar 的生产端点配置无法唯一识别，需要核对该桌面版本',
+  ENDPOINT_UNAVAILABLE: '桌面提供的生产行情端点均不可连接，请检查网络或代理',
   HTTP_INIT: '原生引擎已初始化，但行情 HTTP 客户端创建失败',
   SESSION_CHECK: '隔离行情会话检查失败，已停止连接',
   STARTUP_UNKNOWN: '本机原生引擎初始化失败，失败阶段未知',

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { optionIdentity, findCounter, desktopGet, readCandles, candleRows } = require('../server/native/candles.cjs');
+const { readCandles, candleRows } = require('../server/native/candles.cjs');
+const { optionIdentity, findCounter, desktopGet } = require('../server/native/market-access.cjs');
 const symbol = 'AAPL261218C00200000.US';
 const counter = 'OP/US/AAPL261218C00200000';
 const request = { symbol, period: 'day', count: 3 };

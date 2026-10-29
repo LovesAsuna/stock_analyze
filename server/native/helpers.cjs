@@ -91,4 +91,16 @@ function authCodes(value) {
   return output;
 }
 
-module.exports = { normalizeNativeSymbol, parseNative, resolveCounter, publicError, withTimeout, authCodes };
+/** 使用唯一的精确搜索协议，不猜测证券产品前缀。参数：native引擎、symbol规范代码、milliseconds期限；返回：原生搜索响应Promise。 */
+function searchNativeSecurities(native, symbol, milliseconds = 5000) {
+  const code = normalizeNativeSymbol(symbol);
+  const params = { term: code.slice(0, -3), markets: [code.slice(-2)], is_code_exact_match: true, products: [], limit: 100 };
+  return withTimeout(native.searchSecurities(JSON.stringify(params)), milliseconds);
+}
+
+/** 比较连接代与订阅代，不混入等待认证、socket身份或目标引用策略。参数：worker会话、generation连接代、epoch订阅代；返回：是否同代。 */
+function sameSessionGeneration(worker, generation, epoch) {
+  return worker.generation === generation && worker.subscriptionGeneration === epoch;
+}
+
+module.exports = { normalizeNativeSymbol, parseNative, resolveCounter, publicError, withTimeout, authCodes, searchNativeSecurities, sameSessionGeneration };

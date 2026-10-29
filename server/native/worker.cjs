@@ -1,19 +1,24 @@
 'use strict';
 /** 独立桌面行情及扫码会话子进程；凭据不离开进程，不提供交易或账户查询接口。 */
-const { join, resolve } = require('node:path');
-const { normalizeNativeSymbol, parseNative, resolveCounter, publicError, withTimeout, authCodes } = require('./helpers.cjs');
-const { normalizeNativeQuote } = require('./quote.cjs');
-const { optionIdentity, findCounter, desktopGet, readCandles } = require('./candles.cjs');
+const { normalizeNativeSymbol, parseNative, resolveCounter, publicError, withTimeout, searchNativeSecurities, sameSessionGeneration } = require('./helpers.cjs');
+const { normalizeNativeQuote, mergeNativeQuoteSnapshot } = require('./quote.cjs');
+const { optionIdentity, findCounter, desktopGet } = require('./market-access.cjs');
+const { readCandles } = require('./candles.cjs');
 const { readIntraday } = require('./intraday.cjs');
+const { validateDesktopEndpoint } = require('./desktop-endpoints.cjs');
+const { NativeAuthSession } = require('./auth-session.cjs');
+const { initializeNative } = require('./bootstrap.cjs');
 
 class NativeQuoteWorker {
-  /** 创建可测试的只读桥接。参数：native原生导出、send事件回调；返回：新实例。 */
-  constructor(native, send) {
+  /** 创建可测试的只读桥接。参数：native原生导出、send事件回调、endpoints自动识别的配套端点；返回：新实例。 */
+  constructor(native, send, endpoints) {
     this.native = native; this.send = send;
+    this.endpoints = endpoints ? { api: validateDesktopEndpoint(endpoints.api, 'https:'),
+      quoteGateway: validateDesktopEndpoint(endpoints.quoteGateway, 'wss:'), lbGatewayWS: validateDesktopEndpoint(endpoints.lbGatewayWS, 'wss:') } : null;
     this.targets = new Map(); this.socket = null;
     this.generation = 0; this.subscriptionGeneration = 0; this.authenticated = false;
     this.deadline = null; this.httpClient = null;
-    this.qrToken = null; this.authGeneration = 0; this.loggedIn = false; this.qrExpiresAt = null;
+    this.auth = new NativeAuthSession(this); this.loggedIn = false;
   }
 
   /** 发送某证券状态。参数：symbol代码、state状态、message安全说明、scope恢复范围；返回：无。 */
@@ -28,17 +33,17 @@ class NativeQuoteWorker {
 
   /** 检查异步操作仍属于当前目标与连接。参数：entry目标、generation连接代、epoch订阅代；返回：布尔。 */
   current(entry, generation, epoch) {
-    return this.targets.get(entry.symbol) === entry && this.generation === generation &&
-      this.subscriptionGeneration === epoch && this.authenticated && Boolean(this.socket);
+    return this.targets.get(entry.symbol) === entry && sameSessionGeneration(this, generation, epoch) && this.authenticated && Boolean(this.socket);
   }
 
   /** 连接原生双通道。参数：无；返回：连接提交状态。 */
   connect() {
     if (this.socket) return { authenticated: this.authenticated };
+    if (!this.endpoints) throw new Error('桌面生产端点尚未自动识别，已拒绝连接');
     const generation = ++this.generation;
     this.authenticated = false;
     this.allStatus('connecting', '正在连接行情双通道');
-    this.socket = this.native.wsClient('wss://quote-gl.lbkrs.com', 'wss://ws-gl.lbkrs.com/v1',
+    this.socket = this.native.wsClient(this.endpoints.quoteGateway, this.endpoints.lbGatewayWS,
       (event, data) => {
         if (generation !== this.generation) return;
         try { this.onEvent(event, data); }
@@ -148,10 +153,8 @@ class NativeQuoteWorker {
 
   /** 执行受代数保护的搜索、订阅、快照。参数：entry目标、generation连接代、epoch订阅代；返回：Promise<void>。 */
   async activateAsync(entry, generation, epoch) {
-    const market = entry.symbol.slice(-2); const code = entry.symbol.slice(0, -3);
-    // 原生搜索要求products字段；空数组覆盖全产品，避免按目标名称猜测股票/ETF/期权。
     const option = optionIdentity(entry.symbol);
-    const raw = await withTimeout(this.native.searchSecurities(JSON.stringify({ term: code, markets: [market], is_code_exact_match: true, products: [], limit: 100 })));
+    const raw = await searchNativeSecurities(this.native, entry.symbol, 12000);
     let counter;
     try { counter = resolveCounter(raw, entry.symbol); }
     catch (error) {
@@ -167,22 +170,17 @@ class NativeQuoteWorker {
     const response = await this.quoteSnapshot(entry, activeSocket, counter);
     if (!this.current(entry, generation, epoch)) return;
     entry.pending = false;
+    this.applySnapshot(entry, counter, response, quoteBeforeSnapshot);
+  }
+
+  /** 核验并发布当前目标快照，报价合并规则由quote模块负责。参数：entry目标、counter精确身份、response快照、previous读取前状态；返回：无。 */
+  applySnapshot(entry, counter, response, previous) {
     if (response.code !== undefined && ![0, '0'].includes(response.code)) throw new Error('桌面原生WS返回失败的行情快照');
     const data = response.data ?? response;
     if (data.counter_id !== counter) throw new Error('桌面原生WS返回不匹配的行情快照');
-    const snapshot = normalizeNativeQuote(data, entry.symbol);
-    if (!snapshot) throw new Error('桌面原生WS返回无法确认订阅的行情快照');
-    // 当前代合法快照可确认连接；保留更新推送的价格、时段和时间。
-    if (entry.latest !== quoteBeforeSnapshot || (entry.latest && snapshot.quote.timestamp < entry.latest.quote.timestamp)) {
-      const previousClose = Number(data.prev_close);
-      if (entry.latest && entry.latest.quote.previousClose === null && previousClose > 0 && Number.isFinite(previousClose)) {
-        entry.latest.fields.prev_close = previousClose; entry.latest.quote.previousClose = previousClose;
-      }
-      this.confirm(entry);
-      this.send('quote', entry.latest.quote);
-      return;
-    }
-    if (!this.deliver(entry, data)) throw new Error('桌面原生WS返回无法确认订阅的行情快照');
+    entry.latest = mergeNativeQuoteSnapshot(data, entry.symbol, entry.latest, entry.latest !== previous);
+    this.confirm(entry);
+    this.send('quote', entry.latest.quote);
   }
 
   /** 读取目标快照，期权WS失败使用桌面同版HTTP。参数：entry目标、socket当前连接、counter身份；返回：快照包装。 */
@@ -221,129 +219,64 @@ class NativeQuoteWorker {
     return { removed: true };
   }
 
-  /** 发送固定认证请求。参数：path已知路径、payload内部参数；返回：已解包响应。 */
-  async authRequest(path, payload = {}) {
-    if (!this.httpClient) throw new Error('认证HTTP客户端未初始化');
-    const stage = path === '/v1/auth/request_scan_login' ? 'AUTH_CREATE' : 'AUTH_POLL';
-    try {
-      const raw = await withTimeout(this.native.httpRequest.call(this.httpClient, 'POST', path, JSON.stringify(payload), '{}'), 10000);
-      const response = parseNative(raw);
-      const result = parseNative(response.body ?? response);
-      const codes = { ...authCodes(response), ...authCodes(result) };
-      this.send('log', { kind: 'info', message: `${stage}_RESPONSE ${JSON.stringify(codes)}` });
-      if (result.code !== undefined && ![0, '0'].includes(result.code)) throw Object.assign(new Error('扫码认证服务返回错误'), { code: codes.code });
-      return result;
-    } catch (error) {
-      const codes = authCodes(error);
-      this.send('log', { kind: 'error', message: `${stage}_FAILED ${JSON.stringify(codes)}` });
-      throw error;
-    }
-  }
+  /** 委托隔离扫码会话创建二维码。参数：无；返回：不含令牌的SVG和有效期。 */
+  createQr() { return this.auth.createQr(); }
 
-  /** 创建二维码，仅将本地生成SVG回传服务器。参数：无；返回：SVG和有效期，不含令牌。 */
-  async createQr() {
-    const generation = ++this.authGeneration;
-    this.qrToken = null;
-    const result = await this.authRequest('/v1/auth/request_scan_login');
-    if (generation !== this.authGeneration) throw new Error('扫码请求已取消');
-    const token = result.data?.token;
-    if (typeof token !== 'string' || !token || token.length > 4096) throw new Error('扫码服务未返回有效二维码');
-    const seconds = Number(result.data.expires_in);
-    const expiresIn = Number.isFinite(seconds) && seconds > 0 ? Math.max(1, Math.min(seconds, 600)) : 180;
-    const expiresAt = Date.now() + expiresIn * 1000;
-    const QRCode = require('qrcode');
-    const svg = await QRCode.toString(`lb://page_flutter/web_login/submit?token=${encodeURIComponent(token)}`, { type: 'svg', width: 280, margin: 4, errorCorrectionLevel: 'M' });
-    if (generation !== this.authGeneration) throw new Error('扫码请求已取消');
-    this.qrToken = token; this.qrExpiresAt = expiresAt;
-    return { svg, expiresIn, expiresAt };
-  }
-
-  /** 轮询扫码并只在本代请求写入隔离session。参数：无；返回：waiting/success安全状态。 */
+  /** 轮询扫码，成功后切换报价身份并保持现有目标。参数：无；返回：waiting/success安全状态。 */
   async pollQr() {
-    if (!this.qrToken || (this.qrExpiresAt !== null && Date.now() >= this.qrExpiresAt)) throw new Error('无有效扫码会话');
-    const generation = this.authGeneration; const token = this.qrToken;
-    const result = await this.authRequest('/v1/auth/scan_login', { token });
-    if (generation !== this.authGeneration || token !== this.qrToken || (this.qrExpiresAt !== null && Date.now() >= this.qrExpiresAt)) throw new Error('扫码请求已取消或过期');
-    const credentials = result.data?.credentials;
-    if (!credentials) return { state: 'waiting' };
-    if (typeof credentials.token !== 'string' || !credentials.token || credentials.token.length > 8192) throw new Error('扫码登录返回无效凭据');
-    await this.native.httpSetSession.call(this.httpClient, 'token', credentials.token);
-    if (generation !== this.authGeneration) throw new Error('扫码请求已取消');
-    if (typeof credentials.refresh_token === 'string' && credentials.refresh_token) {
-      await this.native.httpSetSession.call(this.httpClient, 'refresh_token', credentials.refresh_token);
-    }
-    if (generation !== this.authGeneration) throw new Error('扫码请求已取消');
-    this.qrToken = null; this.loggedIn = true;
-    this.reconnectSession();
-    return { state: 'success' };
+    const generation = this.auth.generation;
+    const result = await this.auth.pollQr();
+    this.auth.assertGeneration(generation);
+    if (result.state === 'success') { this.loggedIn = true; this.reconnectSession(); }
+    return result;
   }
 
   /** 用新身份重连并保持所有目标。参数：无；返回：连接提交状态。 */
   reconnectSession() {
     this.close(); this.subscriptionGeneration += 1;
-    for (const entry of this.targets.values()) { entry.counter = null; entry.pending = false; entry.confirmed = false; entry.latest = null; }
+    for (const entry of this.targets.values()) entry.latest = null;
     return this.connect();
   }
 
   /** 关闭子进程自有连接。参数：无；返回：无。 */
   close() {
     clearTimeout(this.deadline); this.generation += 1; this.resetSubscriptions();
-    this.authGeneration += 1; this.qrToken = null; this.qrExpiresAt = null;
+    this.auth.cancel();
     const socket = this.socket; this.socket = null;
     if (socket) this.native.wsClose.call(socket);
   }
 }
 
-/** 仅在独立启动入口加载已安装引擎。参数：无；返回：初始化后的原生导出。 */
-async function initializeNative() {
-  const { startupFailure } = require('./startup-errors.cjs');
-  let stage = 'ISOLATION';
-  try {
-    const isolation = process.env.LB_ENGINE_ISOLATION;
-    if (!isolation || resolve(process.env.APPDATA || '') !== resolve(join(isolation, 'AppData', 'Roaming')) ||
-      resolve(process.env.HOME || '') !== resolve(isolation)) throw new Error('原生行情必须使用隔离目录');
-    stage = 'INSTALL_MISSING';
-    const installation = require('./desktop-installation.cjs').resolveDesktopInstallation();
-    stage = 'NATIVE_LOAD';
-    const native = require(installation.addonPath);
-    stage = 'TIMESTAMP_COMPAT';
-    require('./native-compat-timestamp.cjs').installDesktopTimestamp(native, installation.asarPath);
-    stage = 'ENGINE_INIT';
-    native.initEngine(JSON.stringify({ app_id: 'global.longbridge.app.desktop', env: 'prod', version: '2.38.18', build: 'c51f69d8', language: 'zh-CN', enable_sentry: false, beacon: { type: 'noop' } }));
-    stage = 'HTTP_INIT';
-    const client = native.httpNew(JSON.stringify({ base_url: 'https://api-gl.lbkrs.com', headers: {}, http2: false, doh: false }));
-    stage = 'SESSION_CHECK';
-    let hasSession = false;
-    try { hasSession = Boolean(await native.httpGetSession.call(client, 'token')); }
-    catch (error) { if (String(error) !== 'not found') throw new Error('无法检查隔离会话'); }
-    if (hasSession) throw new Error('匿名行情隔离会话含有登录态，已拒绝连接');
-    return { native, client };
-  } catch (error) { throw startupFailure(stage, error); }
+/** 派发受限原生操作，不接受任意方法名或交易操作。参数：worker会话、method操作、payload参数；返回：操作结果或Promise。 */
+function dispatchRequest(worker, method, payload) {
+  switch (method) {
+    case 'connect': return worker.connect();
+    case 'subscribe': return worker.subscribe(payload?.symbol);
+    case 'unsubscribe': return worker.unsubscribe(payload?.symbol);
+    case 'candles': return readCandles(worker, payload);
+    case 'intraday': return readIntraday(worker, payload);
+    case 'qr-create': return worker.createQr();
+    case 'qr-poll': return worker.pollQr();
+    default: throw new Error('不支持的原生行情请求');
+  }
 }
 
-/** 启动受限IPC循环。参数：无；返回：Promise<void>。 */
+/** 校验IPC请求并构建脱敏响应信封。参数：worker会话、message请求、reply回复函数；返回：请求处理完成Promise。 */
+async function handleRequest(worker, message, reply) {
+  if (!message || !Number.isSafeInteger(message.id)) return;
+  try { reply({ id: message.id, result: await dispatchRequest(worker, message.method, message.payload) }); }
+  catch (error) { reply({ id: message.id, error: publicError(error) }); }
+}
+
+/** 启动受限IPC循环，仅负责绑定消息与进程生命周期。参数：无；返回：完成绑定Promise。 */
 async function main() {
-  const { native, client } = await initializeNative();
+  const { native, client, endpoints } = await initializeNative();
   const send = (event, data) => { if (process.connected) process.send({ event, data }); };
-  const worker = new NativeQuoteWorker(native, send);
+  const worker = new NativeQuoteWorker(native, send, endpoints);
   worker.httpClient = client;
-  process.on('message', async message => {
-    if (!message || !Number.isSafeInteger(message.id)) return;
-    try {
-      let result;
-      if (message.method === 'connect') result = worker.connect();
-      else if (message.method === 'subscribe') result = worker.subscribe(message.payload?.symbol);
-      else if (message.method === 'unsubscribe') result = worker.unsubscribe(message.payload?.symbol);
-      else if (message.method === 'candles') result = await readCandles(worker, message.payload);
-      else if (message.method === 'intraday') result = await readIntraday(worker, message.payload);
-      else if (message.method === 'qr-create') result = await worker.createQr();
-      else if (message.method === 'qr-poll') result = await worker.pollQr();
-      else throw new Error('不支持的原生行情请求');
-      if (process.connected) process.send({ id: message.id, result });
-    } catch (error) {
-      if (process.connected) process.send({ id: message.id, error: publicError(error) });
-    }
-  });
+  send('log', { kind: 'info', category: 'ENDPOINT_SELECTED', message: endpoints.region });
+  const reply = message => { if (process.connected) process.send(message); };
+  process.on('message', message => handleRequest(worker, message, reply));
   process.on('disconnect', () => { try { worker.close(); } finally { process.exit(0); } });
   send('ready', { isolated: true });
 }
@@ -353,4 +286,4 @@ if (require.main === module) main().catch(error => {
   if (process.connected) process.send({ event: 'fatal', data: { code: diagnostic.code } }, () => process.exit(1));
   else process.exit(1);
 });
-module.exports = { NativeQuoteWorker };
+module.exports = { NativeQuoteWorker, dispatchRequest, handleRequest };

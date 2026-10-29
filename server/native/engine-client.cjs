@@ -14,6 +14,16 @@ function anonymousEnvironment() {
     && !/(?:LONG(?:BRIDGE|PORT)|^LB_).*(?:TOKEN|SECRET|KEY|SESSION|AUTH)/i.test(key)));
 }
 
+/** 建立自有配置目录并生成匿名环境。参数：directory本代根目录；返回：不含继承凭据且路径完整的子进程环境。 */
+async function createIsolationEnvironment(directory) {
+  const paths = { APPDATA: join(directory, 'AppData', 'Roaming'), LOCALAPPDATA: join(directory, 'AppData', 'Local'),
+    USERPROFILE: directory, HOME: directory, XDG_CONFIG_HOME: join(directory, '.config'),
+    XDG_DATA_HOME: join(directory, '.local', 'share'), XDG_CACHE_HOME: join(directory, '.cache') };
+  const directories = [...new Set([...Object.values(paths), join(directory, 'Library', 'Application Support')])];
+  await Promise.all(directories.map(path => mkdir(path, { recursive: true })));
+  return { ...anonymousEnvironment(), LB_ENGINE_ISOLATION: directory, ...paths };
+}
+
 class EngineClient extends EventEmitter {
   /** 初始化客户端。参数：无；返回：新实例。 */
   constructor() {
@@ -22,7 +32,6 @@ class EngineClient extends EventEmitter {
     this.starting = null;
     this.stopping = null;
     this.run = null;
-    this.directory = null;
     this.pending = new Map();
     this.nextId = 0;
   }
@@ -45,22 +54,14 @@ class EngineClient extends EventEmitter {
   async launch(run) {
     try {
       run.directory = await mkdtemp(join(tmpdir(), 'market-lens-native-'));
-      this.directory = run.directory;
-      const roaming = join(run.directory, 'AppData', 'Roaming');
-      const local = join(run.directory, 'AppData', 'Local');
-      const config = join(run.directory, '.config');
-      const data = join(run.directory, '.local', 'share');
-      const cache = join(run.directory, '.cache');
-      const applicationSupport = join(run.directory, 'Library', 'Application Support');
-      await Promise.all([roaming, local, config, data, cache, applicationSupport].map(directory => mkdir(directory, { recursive: true })));
+      const environment = await createIsolationEnvironment(run.directory);
       if (run.cancelled) throw new Error('行情引擎启动已取消');
       const child = fork(join(__dirname, 'worker.cjs'), [], {
         cwd: run.directory,
         // 明确沿用 Bun 宿主；本机已验证原生 addon 的初始化、IPC 与退出清理。
         execPath: process.execPath,
         execArgv: [],
-        env: { ...anonymousEnvironment(), LB_ENGINE_ISOLATION: run.directory, APPDATA: roaming, LOCALAPPDATA: local, USERPROFILE: run.directory,
-          HOME: run.directory, XDG_CONFIG_HOME: config, XDG_DATA_HOME: data, XDG_CACHE_HOME: cache },
+        env: environment,
         stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
       });
       run.child = child; this.child = child;
@@ -145,15 +146,16 @@ class EngineClient extends EventEmitter {
     await this.start();
     const child = this.child;
     if (this.stopping || !child?.connected || this.run?.cancelled) throw new Error('行情引擎已停止');
+    const isReadOnlyRequest = ['candles', 'intraday'].includes(method);
     return new Promise((resolve, reject) => {
       const id = ++this.nextId;
       // 只读K线和分时超时仅拒绝该请求；订阅/认证超时需销毁本代会话，阻止迟到操作。
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        if (['candles', 'intraday'].includes(method)) { reject(new Error('当前桌面行情请求超时，请稍后重试')); return; }
+        if (isReadOnlyRequest) { reject(new Error('当前桌面行情请求超时，请稍后重试')); return; }
         reject(new Error('行情引擎请求超时，隔离会话已停止'));
         this.stop().catch(() => this.emit('log', { kind: 'error', message: '超时会话清理失败，请检查临时目录权限' }));
-      }, ['candles', 'intraday'].includes(method) ? 45000 : 12000);
+      }, isReadOnlyRequest ? 45000 : 12000);
       this.pending.set(id, { resolve, reject, timer });
       const failed = () => {
         clearTimeout(timer); this.pending.delete(id); reject(new Error('无法向行情进程发送请求'));
@@ -191,7 +193,7 @@ class EngineClient extends EventEmitter {
       await this.terminate(run);
       if (run.directory) await rm(run.directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
       if (this.run === run) {
-        this.run = null; this.directory = null; this.child = null;
+        this.run = null; this.child = null;
       }
     })().catch(error => { run.cleaning = null; throw error; });
     return run.cleaning;

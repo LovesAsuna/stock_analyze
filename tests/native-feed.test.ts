@@ -4,11 +4,11 @@ import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import { createNativeFeed, NativeFeed } from '../server/native-feed.js';
 import type { MarketStreamEvent } from '../shared/realtime.js';
+import { createNativeWorker } from './fixtures/native-worker.js';
 
 const require = createRequire(import.meta.url);
 const { normalizeNativeSymbol, resolveCounter } = require('../server/native/helpers.cjs');
 const { normalizeNativeQuote } = require('../server/native/quote.cjs');
-const { NativeQuoteWorker } = require('../server/native/worker.cjs');
 
 /** 等待纯内存异步任务完成。参数：无；返回：下一个事件循环Promise。 */
 async function flush(): Promise<void> { await new Promise<void>((resolve) => setImmediate(resolve)); }
@@ -76,7 +76,7 @@ test('原生增量拒旧时间，保留昨收并按已确认交易状态选择�
 
 test('原生重连恢复所有目标，过期搜索及快照不能覆盖新一代订阅', async () => {
   const native = mockNative(); const events: { event: string; data: any }[] = [];
-  const worker = new NativeQuoteWorker(native, (event: string, data: unknown) => events.push({ event, data }));
+  const worker = createNativeWorker(native, (event: string, data: unknown) => events.push({ event, data }));
   try {
     worker.subscribe('QQQ.US'); worker.subscribe('700.HK'); worker.connect();
     const callback = native.callbacks[0];
@@ -105,7 +105,7 @@ test('原生重连恢复所有目标，过期搜索及快照不能覆盖新一�
 
 test('精确匹配失败以错误事件报告，不猜测counter前缀', async () => {
   const native = mockNative(); const events: any[] = [];
-  const worker = new NativeQuoteWorker(native, (_event: string, data: unknown) => events.push(data));
+  const worker = createNativeWorker(native, (_event: string, data: unknown) => events.push(data));
   try {
     worker.subscribe('QQQ.US'); worker.connect(); native.callbacks[0]('message', { type: 'authenticated' });
     native.searchJobs[0].resolve(security('SQQQ')); await flush();
@@ -117,7 +117,7 @@ test('精确匹配失败以错误事件报告，不猜测counter前缀', async (
 test('证券搜索超时发出明确错误，迟到搜索不能创建订阅', async (context) => {
   context.mock.timers.enable({ apis: ['setTimeout'] });
   const native = mockNative(); const events: any[] = [];
-  const worker = new NativeQuoteWorker(native, (_event: string, data: unknown) => events.push(data));
+  const worker = createNativeWorker(native, (_event: string, data: unknown) => events.push(data));
   try {
     worker.subscribe('QQQ.US'); worker.connect(); native.callbacks[0]('message', { type: 'authenticated' });
     context.mock.timers.tick(12000); await flush();
@@ -128,7 +128,7 @@ test('证券搜索超时发出明确错误，迟到搜索不能创建订阅', as
 
 test('取消目标和重连后，旧快照不能确认新目标或覆盖价格', async () => {
   const native = mockNative(); const events: any[] = [];
-  const worker = new NativeQuoteWorker(native, (event: string, data: unknown) => events.push({ event, data }));
+  const worker = createNativeWorker(native, (event: string, data: unknown) => events.push({ event, data }));
   try {
     worker.subscribe('QQQ.US'); worker.connect(); native.callbacks[0]('message', { type: 'authenticated' });
     native.searchJobs[0].resolve(security()); await flush();
@@ -150,7 +150,7 @@ test('有效期权推送后快照失败或超时不降级连接并持续传递�
   for (const failure of ['reject', 'timeout', 'response']) {
     const native = mockNative(); const events: MarketStreamEvent[] = []; let stops = 0;
     const engine = new EventEmitter() as EventEmitter & { call: (method: string, payload?: { symbol: string }) => Promise<any>; stop: () => Promise<void> };
-    const worker = new NativeQuoteWorker(native, (event: string, data: unknown) => engine.emit(event, data));
+    const worker = createNativeWorker(native, (event: string, data: unknown) => engine.emit(event, data));
     engine.call = async (method, payload) => method === 'connect' ? worker.connect() : worker[method](payload?.symbol);
     engine.stop = async () => { stops++; worker.close(); };
     const feed = new NativeFeed(engine); const symbol = 'RKLB261218C00100000.US'; const counter = 'OPTION/US/RKLB261218C00100000';
@@ -174,7 +174,7 @@ test('有效期权推送后快照失败或超时不降级连接并持续传递�
 });
 
 test('期权WS快照失败使用桌面HTTP且拒绝旧会话继续回退', async () => {
-  const native = mockNative(); const worker = new NativeQuoteWorker(native, () => {});
+  const native = mockNative(); const worker = createNativeWorker(native, () => {});
   let requests = 0; const symbol = 'DRAM270115C70000.US'; const counter = 'OP/US/DRAM270115C70000';
   Object.assign(native, { httpRequest: async (_method: string, path: string, raw: string) => {
     requests++; assert.equal(path, '/v2/quote/option/detail'); assert.equal(JSON.parse(raw).counter_id, counter);
@@ -195,7 +195,7 @@ test('期权WS快照失败使用桌面HTTP且拒绝旧会话继续回退', async
 
 test('重连的当前代旧快照可确认连接且保留更新价格与时间', async () => {
   const native = mockNative(); const events: any[] = [];
-  const worker = new NativeQuoteWorker(native, (event: string, data: any) => events.push({ event, data }));
+  const worker = createNativeWorker(native, (event: string, data: any) => events.push({ event, data }));
   try {
     worker.subscribe('QQQ.US'); worker.connect(); const callback = native.callbacks[0];
     callback('message', { type: 'authenticated' }); native.searchJobs[0].resolve(security()); await flush();
@@ -211,7 +211,7 @@ test('重连的当前代旧快照可确认连接且保留更新价格与时间',
 
 test('rejected清除已确认和搜索中标记，旧搜索不能污染重新认证', async () => {
   const native = mockNative(); const events: any[] = [];
-  const worker = new NativeQuoteWorker(native, (event: string, data: any) => events.push({ event, data }));
+  const worker = createNativeWorker(native, (event: string, data: any) => events.push({ event, data }));
   try {
     worker.subscribe('QQQ.US'); worker.subscribe('700.HK'); worker.connect(); const callback = native.callbacks[0];
     callback('message', { type: 'authenticated' }); native.searchJobs[0].resolve(security()); await flush();
@@ -233,7 +233,7 @@ test('单个期权失败仅重试该目标，正常行情和共享进程持续�
   context.mock.timers.enable({ apis: ['setTimeout'] });
   const native = mockNative(); const events: MarketStreamEvent[] = []; let stops = 0;
   const engine = new EventEmitter() as EventEmitter & { call: (method: string, payload?: { symbol: string }) => Promise<any>; stop: () => Promise<void> };
-  const worker = new NativeQuoteWorker(native, (event: string, data: unknown) => engine.emit(event, data));
+  const worker = createNativeWorker(native, (event: string, data: unknown) => engine.emit(event, data));
   engine.call = async (method, payload) => method === 'connect' ? worker.connect() : worker[method](payload?.symbol);
   engine.stop = async () => { stops++; worker.close(); };
   const feed = new NativeFeed(engine); const option = 'DRAM261218C00100000.US';
@@ -262,7 +262,7 @@ test('协议重新认证后证券失败不延续旧连接重启，后续断线�
   context.mock.timers.enable({ apis: ['setTimeout'] });
   const native = mockNative(); let stops = 0;
   const engine = new EventEmitter() as EventEmitter & { call: (method: string, payload?: { symbol: string }) => Promise<any>; stop: () => Promise<void> };
-  const worker = new NativeQuoteWorker(native, (event: string, data: unknown) => engine.emit(event, data));
+  const worker = createNativeWorker(native, (event: string, data: unknown) => engine.emit(event, data));
   engine.call = async (method, payload) => method === 'connect' ? worker.connect() : worker[method](payload?.symbol);
   engine.stop = async () => { stops++; worker.close(); };
   const feed = new NativeFeed(engine);
@@ -277,7 +277,7 @@ test('协议重新认证后证券失败不延续旧连接重启，后续断线�
 
 test('目标重试有界退避，成功确认取消待执行重试', async (context) => {
   context.mock.timers.enable({ apis: ['setTimeout'] });
-  const native = mockNative(); const worker = new NativeQuoteWorker(native, () => {});
+  const native = mockNative(); const worker = createNativeWorker(native, () => {});
   try {
     worker.subscribe('QQQ.US'); worker.connect(); native.callbacks[0]('message', { type: 'authenticated' });
     for (const [index, delay] of [4000, 8000, 16000].entries()) {

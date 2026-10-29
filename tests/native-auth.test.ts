@@ -7,9 +7,9 @@ import { NativeFeed } from '../server/native-feed.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { NativeAuthController } from '../server/native-auth.js';
 import { handleAuthRequest } from '../server/auth-routes.js';
+import { createNativeWorker } from './fixtures/native-worker.js';
 
 const require = createRequire(import.meta.url);
-const { NativeQuoteWorker } = require('../server/native/worker.cjs');
 const { authCodes } = require('../server/native/helpers.cjs');
 
 /** 完成内存异步回调。参数：无；返回：事件循环Promise。 */
@@ -92,8 +92,8 @@ test('上游短二维码有效期不会延长且API错误不会当作过期', as
   const auth = new NativeAuthController(session); const status = await auth.start();
   assert.equal(status.expiresAt! - Date.now(), 2000);
   context.mock.timers.tick(2000); await flush(); assert.equal(auth.getState().state, 'expired');
-  const worker = new NativeQuoteWorker({ httpRequest: async () => ({ code: 401, data: {} }) }, () => {});
-  worker.httpClient = {}; worker.qrToken = 'fake-qr';
+  const worker = createNativeWorker({ httpRequest: async () => ({ code: 401, data: {} }) }, () => {});
+  worker.httpClient = {}; worker.auth.qrToken = 'fake-qr';
   await assert.rejects(worker.pollQr(), /服务返回错误/); worker.close();
 });
 
@@ -121,7 +121,7 @@ test('worker凭据仅写隔离HTTP session，成功重连并保留行情目标',
     httpSetSession: async (key: string, value: string) => { writes.push({ key, value }); },
     wsClose: () => {}, wsClient: (...args: unknown[]) => { connects.push(args); return {}; },
   };
-  const worker = new NativeQuoteWorker(native, () => {}); worker.httpClient = {}; worker.qrToken = 'fake-qr';
+  const worker = createNativeWorker(native, () => {}); worker.httpClient = {}; worker.auth.qrToken = 'fake-qr';
   worker.targets.set('QQQ.US', { symbol: 'QQQ.US', counter: null, pending: false, confirmed: false, latest: null });
   try {
     const result = await worker.pollQr();
@@ -139,12 +139,12 @@ test('worker部分写入凭据后失败，控制器销毁身份而不保留假�
     httpSetSession: async () => { writes += 1; if (writes === 2) throw new Error('private-response'); },
     wsClose: () => { closes += 1; },
   };
-  const worker = new NativeQuoteWorker(native, () => {}); worker.httpClient = {}; worker.socket = {};
+  const worker = createNativeWorker(native, () => {}); worker.httpClient = {}; worker.socket = {};
   const session = new FakeSession();
   const originalReset = session.resetSession.bind(session);
   session.resetSession = async () => { worker.close(); await originalReset(); };
   session.poll = () => worker.pollQr();
-  const auth = new NativeAuthController(session); await auth.start(); worker.qrToken = 'fake-qr';
+  const auth = new NativeAuthController(session); await auth.start(); worker.auth.qrToken = 'fake-qr';
   context.mock.timers.tick(1500); await flush();
   assert.equal(writes, 2); assert.equal(auth.getState().state, 'error'); assert.equal(session.pinned, false);
   assert.ok(session.resets >= 2); assert.ok(closes >= 1);
@@ -154,9 +154,9 @@ test('认证诊断仅保留数字HTTP/业务码，拒绝响应体与凭据', asy
   assert.deepEqual(authCodes({ status: 429, code: '1234', token: 'fake-private', message: 'secret' }), { httpStatus: 429, code: 1234 });
   assert.deepEqual(authCodes('upstream private body'), {});
   const logs: any[] = [];
-  const worker = new NativeQuoteWorker({ httpRequest: async () => { throw JSON.stringify({ status: 429, code: 1234, token: 'fake-private' }); } }, (event: string, data: any) => logs.push({ event, data }));
+  const worker = createNativeWorker({ httpRequest: async () => { throw JSON.stringify({ status: 429, code: 1234, token: 'fake-private' }); } }, (event: string, data: any) => logs.push({ event, data }));
   worker.httpClient = {};
-  await assert.rejects(worker.authRequest('/v1/auth/request_scan_login'));
+  await assert.rejects(worker.auth.request('/v1/auth/request_scan_login'));
   assert.equal(JSON.stringify(logs).includes('fake-private'), false);
   assert.match(logs[0].data.message, /AUTH_CREATE_FAILED/);
   assert.match(logs[0].data.message, /429/); assert.match(logs[0].data.message, /1234/);
@@ -165,7 +165,7 @@ test('认证诊断仅保留数字HTTP/业务码，拒绝响应体与凭据', asy
 test('worker取消代数阻止迟到扫码凭据写入', async () => {
   const pending = deferred(); let writes = 0;
   const native = { httpRequest: () => pending.promise, httpSetSession: async () => { writes += 1; } };
-  const worker = new NativeQuoteWorker(native, () => {}); worker.httpClient = {}; worker.qrToken = 'fake-qr';
+  const worker = createNativeWorker(native, () => {}); worker.httpClient = {}; worker.auth.qrToken = 'fake-qr';
   const polling = worker.pollQr(); worker.close();
   pending.resolve({ code: 0, data: { credentials: { token: 'fake-late' } } });
   await assert.rejects(polling, /取消/); assert.equal(writes, 0);

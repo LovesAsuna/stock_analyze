@@ -24,6 +24,8 @@ test('启动诊断区分安装、架构、依赖、签名和时间戳兼容，�
     ['NATIVE_LOAD', 'code signature invalid /private/user', 'NATIVE_SIGNATURE'],
     ['TIMESTAMP_COMPAT', 'private-package-value', 'TIMESTAMP_COMPAT'],
     ['HTTP_INIT', 'private-client-value', 'HTTP_INIT'],
+    ['ENDPOINT_CONFIG', 'private-package-value', 'ENDPOINT_CONFIG'],
+    ['ENDPOINT_UNAVAILABLE', 'private-network-value', 'ENDPOINT_UNAVAILABLE'],
   ];
   for (const [stage, text, code] of cases) {
     const error = startupFailure(stage, new Error(text));
