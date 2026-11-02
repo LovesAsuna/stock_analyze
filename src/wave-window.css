@@ -1,0 +1,16 @@
+.wave-window-overlay { position: absolute; top: 0; left: 0; z-index: var(--z-raised); pointer-events: none; overflow: hidden; }
+.wave-window-shade { position: absolute; top: 0; bottom: 0; background: var(--color-overlay); opacity: 0.3; }
+.wave-window-boundary { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px solid var(--color-accent); }
+.wave-window-label { position: absolute; top: 108px; left: 4px; color: var(--color-ink); background: var(--color-paper-3); border-radius: var(--radius-sm); padding: 2px 5px; font-size: var(--text-xs); }
+.wave-window-to .wave-window-label { left: auto; right: 4px; }
+.wave-window-handle { position: absolute; top: 50%; width: 44px; height: 44px; padding: 0; border: none; transform: translate(-50%, -50%); background: transparent; pointer-events: auto; touch-action: none; cursor: ew-resize; user-select: none; display: grid; place-items: center; border-radius: var(--radius-sm); }
+.wave-window-handle > span { display: grid; place-items: center; width: 14px; height: 22px; border: 1px solid var(--color-accent); border-radius: 4px; background: var(--color-paper-3); }
+.wave-window-handle > span::after { content: ''; width: 4px; height: 8px; border-inline: 1px solid var(--color-ink); }
+.wave-window-handle:hover > span, .wave-window-handle:active > span { background: var(--color-brand-soft); border-color: var(--color-focus); }
+.wave-window-handle:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+.wave-window-handle:active:not(:disabled) { transform: translate(-50%, -50%); }
+.wave-window-controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-xs) var(--space-md); padding: var(--space-xs) var(--space-sm); border-bottom: 1px solid var(--color-rule); color: var(--color-muted); font-size: var(--text-xs); }
+.wave-window-controls label { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-xs); min-width: 0; }
+.wave-window-controls select { max-width: 100%; min-height: 36px; }
+.wave-window-controls button { min-height: 36px; }
+.wave-window-controls > span { flex-basis: 100%; }

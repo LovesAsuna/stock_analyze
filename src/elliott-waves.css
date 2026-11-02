@@ -1,0 +1,7 @@
+.elliott-summary { padding: var(--space-xs) var(--space-md); border-top: 1px solid var(--color-rule); color: var(--color-muted); font-size: var(--text-xs); }
+.elliott-summary p + p { margin-top: var(--space-2xs); }
+.elliott-summary strong { color: var(--color-ink); font-weight: 500; }
+.elliott-swatch { display: inline-block; width: 16px; margin-right: var(--space-2xs); border-top: 2px solid var(--color-wave); vertical-align: middle; }
+.elliott-summary details { margin-top: var(--space-xs); }
+.elliott-summary summary { cursor: pointer; min-height: 32px; padding-block: var(--space-2xs); color: var(--color-ink); }
+.elliott-summary caption { text-align: left; padding-block: var(--space-xs); color: var(--color-muted); }

@@ -1,5 +1,5 @@
 import { Activity, ArrowDownRight, ArrowUpRight, CandlestickChart, ChevronRight, Command, Database, LayoutDashboard, Search, Settings2, ShieldCheck, Target } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import type { Candle, Security, SourceMode } from '../shared/types';
 import { formatNumber, formatPercent } from './format';
 import { EventCenter } from './EventCenter';
@@ -17,14 +17,56 @@ export function WorkspaceHeader({ onSearch, onSettings, source }: HeaderProps) {
   </header>;
 }
 
-/** 页内导航。参数：设置回调；返回：分析、计划与复盘的真实锚点入口。 */
+const WORKSPACE_SECTIONS = ['analysis', 'strategy', 'review'] as const;
+type WorkspaceSection = typeof WORKSPACE_SECTIONS[number];
+
+/** 跟随页面位置定位当前栏目。参数：无；返回：当前区域，兼容异步布局和区域移除。 */
+function useWorkspaceSection(): WorkspaceSection {
+  const [active, setActive] = useState<WorkspaceSection>('analysis');
+  useEffect(() => {
+    let frame = 0;
+    /** 在一帧内合并滚动和布局变化。参数：无；返回：无。 */
+    const schedule = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const sections = WORKSPACE_SECTIONS.flatMap(id => {
+          const element = document.getElementById(id);
+          return element ? [{ id, top: element.getBoundingClientRect().top }] : [];
+        });
+        const activationLine = window.innerHeight * 0.25;
+        // 页尾可能无法把最后一栏滚到判定线，此时选最后一个已进入视口的栏目。
+        const atBottom = window.scrollY > 0 && window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2;
+        const reached = sections.filter(section => section.top <= activationLine || (atBottom && section.top < window.innerHeight));
+        setActive(reached.at(-1)?.id ?? 'analysis');
+      });
+    };
+    const observer = new ResizeObserver(schedule);
+    const main = document.querySelector('main');
+    if (main) observer.observe(main);
+    window.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule);
+    window.addEventListener('hashchange', schedule);
+    schedule();
+    return () => {
+      cancelAnimationFrame(frame); observer.disconnect();
+      window.removeEventListener('scroll', schedule);
+      window.removeEventListener('resize', schedule);
+      window.removeEventListener('hashchange', schedule);
+    };
+  }, []);
+  return active;
+}
+
+/** 页内导航。参数：设置回调；返回：随当前可见区域高亮的真实锚点入口。 */
 export function WorkspaceRail({ onSettings }: { onSettings: () => void }) {
+  const active = useWorkspaceSection();
   return <nav className="rail" aria-label="工作台导航">
     <a href="#" className="rail-brand" aria-label="观势首页"><Activity size={25} aria-hidden="true" /></a>
     <span className="rail-caption">工作空间</span>
-    <a className="rail-link active" href="#analysis" aria-label="行情分析"><CandlestickChart size={21} aria-hidden="true" /><span>分析</span></a>
-    <a className="rail-link" href="#strategy" aria-label="交易计划"><Target size={20} aria-hidden="true" /><span>计划</span></a>
-    <a className="rail-link" href="#review" aria-label="执行复盘"><LayoutDashboard size={20} aria-hidden="true" /><span>复盘</span></a>
+    <a className={`rail-link${active === 'analysis' ? ' active' : ''}`} aria-current={active === 'analysis' ? 'location' : undefined} href="#analysis" aria-label="行情分析"><CandlestickChart size={21} aria-hidden="true" /><span>分析</span></a>
+    <a className={`rail-link${active === 'strategy' ? ' active' : ''}`} aria-current={active === 'strategy' ? 'location' : undefined} href="#strategy" aria-label="交易计划"><Target size={20} aria-hidden="true" /><span>计划</span></a>
+    <a className={`rail-link${active === 'review' ? ' active' : ''}`} aria-current={active === 'review' ? 'location' : undefined} href="#review" aria-label="执行复盘"><LayoutDashboard size={20} aria-hidden="true" /><span>复盘</span></a>
     <button className="rail-link rail-bottom" onClick={onSettings} aria-label="策略设置"><Settings2 size={21} aria-hidden="true" /><span>设置</span></button>
   </nav>;
 }

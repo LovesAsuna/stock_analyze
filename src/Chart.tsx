@@ -6,6 +6,9 @@ import { chartColor as color, applyChartPreferences, performChartAction } from '
 import { calculateChartStudies, type ChartStudyPoint } from './chart-study-data';
 import { ChartReadouts } from './ChartReadouts';
 import { bindChartWheel } from './chart-wheel';
+import { useWaveWindow } from './useWaveWindow';
+import { createElliottOverlay, updateElliottOverlay, ElliottWaveDetails } from './ElliottWaves';
+import { WaveWindowOverlay, WaveWindowControls } from './WaveWindow';
 import './chart-terminal.css';
 import { createChart, CandlestickSeries, LineSeries, HistogramSeries, createSeriesMarkers, ColorType, LineStyle,
   type IChartApi, type ISeriesApi, type ISeriesMarkersPluginApi, type UTCTimestamp, type SeriesMarker, type Time } from 'lightweight-charts';
@@ -34,6 +37,7 @@ interface ChartState {
   first: ISeriesApi<'Line'>; second: ISeriesApi<'Line'>; third: ISeriesApi<'Histogram'>; adx: ISeriesApi<'Line'>;
   markers: ISeriesMarkersPluginApi<Time>;
   averages: ISeriesApi<'Line'>[];
+  waves: ReturnType<typeof createElliottOverlay>;
 }
 
 /** 创建唯一图表实例与独立价格、成交量、振荡指标窗格，返回可更新的公开 API 引用。 */
@@ -68,8 +72,9 @@ function initialize(container: HTMLElement): ChartState {
   const third = chart.addSeries(HistogramSeries, { lastValueVisible: false, priceLineVisible: false }, 2);
   chart.panes()[0].setStretchFactor(0.66); chart.panes()[1].setStretchFactor(0.14); chart.panes()[2].setStretchFactor(0.20);
   const markers = createSeriesMarkers(price, [], { autoScale: true });
+  const waves = createElliottOverlay(chart);
   container.querySelectorAll('canvas').forEach((canvas) => canvas.setAttribute('aria-hidden', 'true'));
-  return { chart, price, volume, fast, slow, sar, upper, lower, first, second, third, adx, markers, averages };
+  return { chart, price, volume, fast, slow, sar, upper, lower, first, second, third, adx, markers, averages, waves };
 }
 
 /** 将指标的有效值映射成图表点；预热期使用 whitespace，禁止把 null 画成 0。 */
@@ -144,6 +149,7 @@ export function StockChart(props: Props) {
   const [showAverages, setShowAverages] = useState(true);
   const studies = useMemo(() => calculateChartStudies(props.candles), [props.candles]);
   const state = useRef<ChartState | null>(null);
+  const wave = useWaveWindow(props.candles, `${props.symbol}-${props.period}`, state);
   const latestProps = useRef(props); latestProps.current = props;
   const datasetKey = useRef('');
   const selectionKey = useRef('');
@@ -174,6 +180,7 @@ export function StockChart(props: Props) {
       datasetKey.current = key;
     }
   }, [props.candles, props.indicators, props.layers, props.oscillator, props.signals, props.executions, props.symbol, props.period, props.backtest, studies, showAverages]);
+  useEffect(() => { if (state.current) updateElliottOverlay(state.current.waves, wave.analysis); }, [wave.analysis]);
   useChartAppearance(state, preferences);
   useEffect(() => {
     if (!state.current) return;
@@ -215,13 +222,21 @@ export function StockChart(props: Props) {
   return <div ref={host} className="chart-terminal">
     <ChartTools preferences={preferences} onPreferences={setPreferences} onAction={action => { if (state.current) performChartAction(state.current.chart, action); }}
       indicatorsOpen={indicatorsOpen} onIndicators={() => setIndicatorsOpen(value => !value)} fullscreen={screen.fullscreen} onFullscreen={screen.toggle} error={screen.error || error} />
-    {indicatorsOpen && <div className="study-controls"><label><input type="checkbox" checked={showAverages} onChange={event => setShowAverages(event.target.checked)} />MA 5 / 10 / 20 / 50（图表）</label>{props.controls}</div>}
+    {indicatorsOpen && <div className="study-controls"><label><input type="checkbox" checked={showAverages} onChange={event => setShowAverages(event.target.checked)} />MA 5 / 10 / 20 / 50（图表）</label>
+      <label><input type="checkbox" checked={wave.enabled} onChange={event => wave.toggle(event.target.checked)} />自动埃略特波浪</label>
+      {wave.enabled && <label>波浪灵敏度<select aria-label="波浪灵敏度" value={wave.radius} onChange={event => wave.setRadius(Number(event.target.value))}>
+        <option value={3}>灵敏 · 3 根确认</option><option value={6}>标准 · 6 根确认</option><option value={12}>稳健 · 12 根确认</option></select></label>}{props.controls}</div>}
+    {wave.enabled && <WaveWindowControls candles={props.candles} window={wave.window} symbol={props.symbol} period={props.period}
+      onChange={wave.select} onVisible={wave.selectVisible} />}
     <div className="chart-frame">
       <ChartReadouts selected={selected} previous={props.candles[props.candles.findIndex(candle => candle.time === selected?.time) - 1]} point={hoveredPoint}
         study={studies.find(point => point.time === selected?.time)} symbol={props.symbol} period={props.period} tooltip={Boolean(hovered)} showAverages={showAverages} />
       <div ref={container} className="stock-chart" aria-label="价格、成交量和技术指标图。可使用下方数据表和信号列表查看全部数值。" />
+      {wave.enabled && <WaveWindowOverlay chartRef={state} container={container} candles={props.candles} window={wave.window}
+        symbol={props.symbol} period={props.period} onChange={wave.select} />}
     </div>
     <div className="terminal-pane-legend"><span>VOL · 成交量（独立窗格）· 涨：橙／跌：青绿</span><span className="oscillator-caption">{props.oscillator === 'macd' ? 'MACD · DIF 实线 / DEA 虚线 / 柱' : props.oscillator === 'rsi' ? 'RSI · Wilder（策略参数）' : 'DMI · +DI 实线 / −DI 虚线 / ADX 点线'}</span><span>不复权</span></div>
+    {wave.analysis && <ElliottWaveDetails analysis={wave.analysis} symbol={props.symbol} period={props.period} candles={wave.selectedCandles} />}
     {props.footer}
   </div>;
 }
