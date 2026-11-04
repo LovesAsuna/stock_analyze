@@ -14,6 +14,8 @@ import { bindChartWheel } from './chart-wheel';
 import { fitIntradayViewport, intradayVolumeData, lockIntradayViewport } from './intraday-viewport';
 import { calculateIntradayStudies, splitIntradayLine, type IntradayStudyPoint } from './intraday-studies';
 import './intraday-terminal.css';
+import { isBoolean, useLocalSetting } from './local-settings';
+import { DEFAULT_INTRADAY_STUDIES, isIntradayStudies } from './workspace-settings';
 
 interface ChartProps { data: IntradayData; footer?: ReactNode }
 interface StudyVisibility { rsi: boolean; macd: boolean }
@@ -295,8 +297,8 @@ export function IntradayChart({ data, footer }: ChartProps) {
   const host = useRef<HTMLDivElement>(null); const container = useRef<HTMLDivElement>(null);
   const { preferences, setPreferences, error: preferenceError } = useChartPreferences();
   const { fullscreen, toggle, error: fullscreenError } = useChartFullscreen(host);
-  const [indicatorsOpen, setIndicatorsOpen] = useState(false);
-  const [shown, setShown] = useState<StudyVisibility>({ rsi: true, macd: true });
+  const [indicatorsOpen, setIndicatorsOpen, controlsError] = useLocalSetting('market-lens-intraday-controls-v1', false, isBoolean);
+  const [shown, setShown, studiesError] = useLocalSetting('market-lens-intraday-studies-v1', DEFAULT_INTRADAY_STUDIES, isIntradayStudies);
   const [selectedTime, setSelectedTime] = useState<number | null>(null);
   const [actionError, setActionError] = useState('');
   const calculated = useMemo(() => {
@@ -318,7 +320,7 @@ export function IntradayChart({ data, footer }: ChartProps) {
   return <div className="intraday-panel intraday-terminal" ref={host} data-fullscreen={fullscreen}>
     <ChartTools fixedViewport={data.days === 1} preferences={preferences} onPreferences={setPreferences} onAction={onAction}
       indicatorsOpen={indicatorsOpen} onIndicators={() => setIndicatorsOpen(open => !open)} fullscreen={fullscreen}
-      onFullscreen={() => { void toggle(); }} error={calculated.error || error || actionError || fullscreenError || preferenceError} />
+      onFullscreen={() => { void toggle(); }} error={calculated.error || error || actionError || fullscreenError || preferenceError || controlsError || studiesError} />
     {indicatorsOpen && <div className="intraday-study-controls" role="group" aria-label="分时指标选择">
       <span>独立指标窗格</span>{(['rsi', 'macd'] as const).map(key => <label key={key}>
         <input type="checkbox" checked={shown[key]} onChange={event => setShown(previous => ({ ...previous, [key]: event.target.checked }))} />

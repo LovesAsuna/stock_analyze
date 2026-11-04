@@ -1,7 +1,11 @@
 import type { Period } from './types';
+import { isCalendarPeriod } from './periods';
 
 const DAY_SECONDS = 24 * 60 * 60;
 const formatters = new Map<string, Intl.DateTimeFormat>();
+// 历史柱的开收盘窗口只由时间标签、市场时区和周期决定，避免每次快照反复换算DST。
+const calendarWindows = new Map<string, { start: number; end: number }>();
+const MAX_CALENDAR_WINDOWS = 4096;
 type CalendarDate = { year: number; month: number; day: number };
 type LocalParts = CalendarDate & { hour: number; minute: number; second: number };
 
@@ -124,6 +128,11 @@ function weekdayDate(date: Date, direction: 1 | -1): CalendarDate {
 export function calendarBarWindow(time: number, symbol: string, period: Period): { start: number; end: number } {
   validateTime(time);
   const zone = marketZone(symbol);
+  if (!isCalendarPeriod(period)) throw new Error('不支持的日历 K 线周期');
+  const key = `${zone}:${period}:${time}`;
+  const cached = calendarWindows.get(key);
+  // 返回副本，调用者修改结果不能污染后续计算；非法时间和证券仍先通过原边界校验。
+  if (cached) return { ...cached };
   const date = labelDate(time, zone);
   let first = calendarDate(date);
   let last = calendarDate(date);
@@ -141,7 +150,10 @@ export function calendarBarWindow(time: number, symbol: string, period: Period):
   // 日线午夜标签保留既有语义，不为周末标签寻找邻近交易日。
   const startDate = period === 'day' ? date : weekdayDate(first, 1);
   const endDate = period === 'day' ? date : weekdayDate(last, -1);
-  return { start: exchangeTime(startDate, 9, 30, zone), end: exchangeTime(endDate, 16, 0, zone) };
+  const window = { start: exchangeTime(startDate, 9, 30, zone), end: exchangeTime(endDate, 16, 0, zone) };
+  if (calendarWindows.size >= MAX_CALENDAR_WINDOWS) calendarWindows.delete(calendarWindows.keys().next().value!);
+  calendarWindows.set(key, window);
+  return { ...window };
 }
 
 /**

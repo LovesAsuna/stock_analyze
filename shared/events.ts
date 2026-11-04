@@ -18,6 +18,13 @@ export interface MarketEvent {
   symbol: string | null;
 }
 
+/** 单个渠道的本次结果；空列表和读取失败分别表示。 */
+export interface EventSourceStatus {
+  label: string;
+  state: 'ok' | 'error';
+  count: number;
+}
+
 /** 各上游独立失败时保留已读结果及提示，不假称新闻列表就是完整日历。 */
 export interface EventData {
   source: SourceMode;
@@ -27,6 +34,7 @@ export interface EventData {
   window: { start: string; end: string };
   events: MarketEvent[];
   warnings: string[];
+  sources?: EventSourceStatus[];
 }
 
 /** 安全解析外链。参数：上游URL；返回：仅HTTP(S)链接或null，拒绝脚本及带凭据地址。 */

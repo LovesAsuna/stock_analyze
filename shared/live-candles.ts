@@ -8,7 +8,7 @@ import type { Candle, Period } from './types.js';
  * @param updates Longbridge原生K线快照；同一柱允许修订，确认状态不得倒退。
  * @param symbol 当前证券，用于统一日线日期标签。
  * @param period 当前周期。
- * @returns 按时间排序的新数组，保留原历史起点与已确认前缀。
+ * @returns 按时间排序的K线，未变化时复用历史数组及柱引用，保留原历史起点与已确认前缀。
  */
 export function mergeLiveCandles(history: Candle[], updates: Candle[], symbol: string, period: Period): Candle[] {
   validateCandles(history);
@@ -20,6 +20,9 @@ export function mergeLiveCandles(history: Candle[], updates: Candle[], symbol: s
     if (key < historyStart) continue;
     const existing = result.get(key);
     if (existing?.confirmed && !candle.confirmed) continue;
+    // 同一日历柱允许不同日期标签；已有时间标签与未变化的柱引用均保持稳定。
+    if (existing && existing.open === candle.open && existing.high === candle.high && existing.low === candle.low &&
+      existing.close === candle.close && existing.volume === candle.volume && existing.confirmed === candle.confirmed) continue;
     result.set(key, existing ? { ...candle, time: existing.time } : candle);
   }
   const candles = [...result.values()].sort((left, right) => left.time - right.time);
@@ -28,5 +31,5 @@ export function mergeLiveCandles(history: Candle[], updates: Candle[], symbol: s
   if (firstUnknown >= 0 && candles.slice(firstUnknown + 1).some((candle) => candle.confirmed)) {
     throw new Error('实时K线存在未完成的历史缺口，等待原生数据重新同步。');
   }
-  return candles;
+  return candles.length === history.length && candles.every((candle, index) => candle === history[index]) ? history : candles;
 }

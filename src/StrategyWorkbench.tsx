@@ -1,4 +1,10 @@
-import { useState } from 'react';
+import { useLocalSetting } from './local-settings';
+
+type StrategyTab = 'results' | 'paths' | 'rules' | 'alerts';
+/** 校验策略栏目。参数：未知值；返回：受支持的标签类型。 */
+function isStrategyTab(value: unknown): value is StrategyTab {
+  return value === 'results' || value === 'paths' || value === 'rules' || value === 'alerts';
+}
 import { PERIOD_LABELS } from '../shared/periods';
 import { Bell, Download, Pencil, Plus, Target } from 'lucide-react';
 import { conditionLabel, evaluateGroup, type TradingPlan } from '../shared/strategy';
@@ -33,12 +39,13 @@ export function PlanToolbar(props: { plan: TradingPlan; saved: boolean; picking:
  * @returns 可编辑、可导出且能定位图表的策略工作区。
  */
 export function StrategyWorkbench(props: Props) {
-  const [tab, setTab] = useState<'results' | 'paths' | 'rules' | 'alerts'>('results');
+  const [tab, setTab, storageError] = useLocalSetting('market-lens-strategy-tab-v1', 'results', isStrategyTab);
   const { plan, result } = props;
   return <section className="strategy-workbench" id="strategy">
     <div className="section-header"><div><h2>交易计划与历史验证</h2><p>{plan.symbol} · {PERIOD_LABELS[plan.period]} · {props.saved ? `计划 v${plan.revision}` : '未保存的趋势跟随模板'}</p></div><div className="plan-toolbar-actions"><button className="button" onClick={props.onEdit}>{props.saved ? <Pencil size={14} /> : <Plus size={14} />}{props.saved ? '修改计划' : '建立交易计划'}</button><button className="button" disabled={!props.saved || !props.candles.length} aria-pressed={props.monitoring} onClick={props.onMonitor}><Bell size={14} />{props.monitoring ? '停止本页监控' : '开启本页监控'}</button><button className="button" onClick={() => exportBacktest(plan, result)}><Download size={14} />导出回测</button></div></div>
     <p className="method-note backtest-range">实际历史验证区间（中国）：{result.researchRange.start == null ? '无有效研究数据' : `${new Date(result.researchRange.start * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })} — ${new Date(result.researchRange.end! * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`}。使用已加载历史预热后的有效数据，与下方成交复盘区间分别显示。初始资金 {formatNumber(plan.initialCapital)} {plan.symbol.endsWith('.HK') ? 'HKD' : 'USD'}。</p>
     <div className="strategy-tabs" aria-label="策略工作区">{([['results', '回测交易'], ['paths', '价格路径'], ['rules', '规则检查'], ['alerts', `监控证据 ${props.alerts.length}`]] as const).map(([value, label]) => <button key={value} className={tab === value ? 'active' : ''} aria-pressed={tab === value} onClick={() => setTab(value)}>{label}</button>)}</div>
+    {storageError && <p className="form-error" role="status">{storageError}</p>}
     {tab === 'results' && <><div className="backtest-metrics">{[['已平仓', `${result.metrics.closedTrades} 笔`], ['胜率', formatPercent(result.metrics.winRate)], ['账户变化', formatPercent(result.metrics.totalReturn)], ['最大回撤', formatPercent(result.metrics.maxDrawdown)], ['盈亏比因子', formatNumber(result.metrics.profitFactor)], ['持仓时间', formatPercent(result.metrics.exposurePct)]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><TradeTable result={result} plan={plan} candles={props.candles} onSelect={props.onSelect} /></>}
     {tab === 'paths' && <PathExplorer points={result.paths} />}
     {tab === 'rules' && <RuleChecklist plan={plan} candles={props.candles} points={props.points} history={props.history} />}

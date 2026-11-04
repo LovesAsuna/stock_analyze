@@ -1,4 +1,8 @@
-import { useState, type ComponentProps } from 'react';
+import type { ComponentProps } from 'react';
+import { useLocalSetting } from './local-settings';
+
+/** 校验研究栏目。参数：未知值；返回：受支持的栏目类型。 */
+function isResearchView(value: unknown): value is 'technical' | 'fundamentals' { return value === 'technical' || value === 'fundamentals'; }
 import { SignalPanel } from './Panels';
 import { FundamentalsPanel } from './FundamentalsPanel';
 import type { SourceMode } from '../shared/types';
@@ -10,12 +14,13 @@ import './fundamentals.css';
  * @returns 不改变主图尺寸的可切换研究侧栏。
  */
 export function ResearchSidebar({ source, refresh, ...signalProps }: ComponentProps<typeof SignalPanel> & { source: SourceMode; refresh: number }) {
-  const [view, setView] = useState<'technical' | 'fundamentals'>('technical');
+  const [view, setView, storageError] = useLocalSetting('market-lens-research-view-v1', 'technical', isResearchView);
   return <div className="research-sidebar flex min-w-0 flex-col">
     <div className="research-sidebar-switch" role="group" aria-label="研究栏目">
       <button type="button" aria-pressed={view === 'technical'} onClick={() => setView('technical')}>技术信号</button>
       <button type="button" aria-pressed={view === 'fundamentals'} onClick={() => setView('fundamentals')}>基本面估值</button>
     </div>
+    {storageError && <p className="form-error" role="status">{storageError}</p>}
     {view === 'technical' ? <SignalPanel {...signalProps} />
       : <FundamentalsPanel source={source} symbol={signalProps.symbol} refresh={refresh} />}
   </div>;

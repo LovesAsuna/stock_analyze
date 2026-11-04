@@ -65,7 +65,8 @@ export function useRealtimeMarket(source: SourceMode, symbol: string, period: Pe
           }
           if (event.period !== period || (current.receivedAt && Date.parse(current.receivedAt) > Date.parse(event.receivedAt))) return current;
           try {
-            const candles = mergeLiveCandles(current.candles, event.candles, symbol, period).slice(-1000);
+            const merged = mergeLiveCandles(current.candles, event.candles, symbol, period);
+            const candles = merged.length > 1000 ? merged.slice(-1000) : merged;
             return { ...current, candles, receivedAt: event.receivedAt };
           } catch {
             return markRecovering(current, '实时K线校验失败，保留已知历史并等待重新同步。', 'candles');
@@ -95,7 +96,9 @@ export function useLiveMarketData(data: MarketData | null, live: ReturnType<type
     if (!data || data.source !== 'longbridge' || !live?.candles.length || live.key !== `longbridge:${data.symbol}:${data.period}`) {
       return { data, error: '' };
     }
-    try { return { data: { ...data, candles: mergeLiveCandles(data.candles, live.candles, data.symbol, data.period) }, error: '' }; }
-    catch { return { data, error: '实时K线与历史数据尚未对齐，保留历史快照并等待同步。' }; }
+    try {
+      const candles = mergeLiveCandles(data.candles, live.candles, data.symbol, data.period);
+      return { data: candles === data.candles ? data : { ...data, candles }, error: '' };
+    } catch { return { data, error: '实时K线与历史数据尚未对齐，保留历史快照并等待同步。' }; }
   }, [data, live?.candles, live?.key]);
 }

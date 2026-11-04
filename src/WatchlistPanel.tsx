@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useLocalSetting } from './local-settings';
+import { isWatchlistMarket } from './workspace-settings';
 import { ListFilter, Search } from 'lucide-react';
 import type { Security, Workspace } from '../shared/types';
 import { formatNumber } from './format';
@@ -11,7 +12,7 @@ import { formatNumber } from './format';
 export function WatchlistPanel({ workspace, selected, loading, demo, onSearch, onSelect }: {
   workspace: Workspace | null; selected: string; loading: boolean; demo: boolean; onSearch: () => void; onSelect: (security: Security) => void;
 }) {
-  const [market, setMarket] = useState('all');
+  const [market, setMarket, storageError] = useLocalSetting('market-lens-watchlist-market-v1', 'all', isWatchlistMarket);
   const securities = workspace?.securities ?? [];
   const visibleSecurities = securities.filter(item => market === 'all' || item.market === market);
   return <aside className="watchlist-panel bg-surface text-foreground border-border">
@@ -20,8 +21,9 @@ export function WatchlistPanel({ workspace, selected, loading, demo, onSearch, o
       <button className="icon-button bg-elevated text-muted-foreground hover:text-brand" aria-label="搜索并添加证券" onClick={onSearch}><Search size={16} aria-hidden="true" /></button>
     </div>
     <div className="market-tabs watchlist-market-tabs bg-canvas" aria-label="证券市场">{[['all', '全部'], ['HK', '港股'], ['US', '美股']].map(([value, label]) =>
-      <button key={value} aria-pressed={market === value} className={market === value ? 'active bg-elevated text-foreground' : 'text-muted-foreground'} onClick={() => setMarket(value)}>{label}</button>)}
+      <button key={value} aria-pressed={market === value} className={market === value ? 'active bg-elevated text-foreground' : 'text-muted-foreground'} onClick={() => setMarket(value as 'all' | 'HK' | 'US')}>{label}</button>)}
     </div>
+    {storageError && <p className="form-error" role="status">{storageError}</p>}
     <div className="watchlist-inventory text-muted-foreground"><span>当前列表</span><span>{visibleSecurities.length} 只证券</span></div>
     <div className="watchlist-columns"><span>代码 / 名称</span><span>持仓</span></div>
     {/* 必须保持为 aside 的直系子节点，让等高布局仅在证券区域内滚动。 */}

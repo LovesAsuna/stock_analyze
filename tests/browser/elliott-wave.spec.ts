@@ -37,6 +37,8 @@ test('K线波浪图层实际绘制、灵敏度、明细、关闭及分时隔离'
   await page.getByRole('button', { name: '展开指标', exact: true }).click();
   const toggle = page.getByRole('checkbox', { name: '自动埃略特波浪', exact: true });
   await expect(toggle).not.toBeChecked();
+  // 日线默认只显示近一个月，完整样本识别须显式选择全部柱。
+  await page.getByRole('button', { name: '适应全部', exact: true }).click();
   await toggle.check();
   const result = page.getByLabel('埃略特波浪识别结果');
   await expect(result).toContainText('上涨推动浪候选 1–5 + A–B–C');
@@ -92,6 +94,7 @@ test('窗口外旧浪不显示，主动选择历史窗口可识别；边界支�
   await expect(start).toHaveAttribute('aria-valuenow', '1');
   await start.press('ArrowLeft');
   await expect(start).toHaveAttribute('aria-valuenow', '0');
+  await start.scrollIntoViewIfNeeded();
   const box = await start.boundingBox(); expect(box).not.toBeNull();
   await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
   await page.mouse.down(); await page.mouse.move(box!.x + box!.width / 2 + 70, box!.y + box!.height / 2, { steps: 8 });
@@ -118,10 +121,13 @@ test('窗口外旧浪不显示，主动选择历史窗口可识别；边界支�
   await page.locator('.analysis-panel').screenshot({ path: 'artifacts/elliott-wave-window.png' });
   await page.getByRole('button', { name: '周线', exact: true }).click();
   await expect(page.locator('.stock-chart canvas').first()).toBeVisible();
-  await page.getByRole('button', { name: '展开指标', exact: true }).click();
+  await expect(page.getByRole('button', { name: '收起指标', exact: true })).toBeVisible();
   const toggle = page.getByRole('checkbox', { name: '自动埃略特波浪', exact: true });
-  await expect(toggle).not.toBeChecked(); await toggle.check();
+  await expect(toggle).toBeChecked();
   await expect(page.getByLabel('波浪分析终点', { exact: true })).toHaveValue('200');
+  await page.getByRole('button', { name: '日线', exact: true }).click();
+  await expect(page.getByLabel('波浪分析起点', { exact: true })).toHaveValue('0');
+  await expect(page.getByLabel('波浪分析终点', { exact: true })).toHaveValue('80');
 });
 
 test('窄屏与真实演示数据开启波浪不产生横向溢出或页面错误', async ({ page }) => {

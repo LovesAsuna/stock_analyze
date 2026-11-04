@@ -1,3 +1,4 @@
+import { memo, useMemo } from 'react';
 import type { IndicatorPoint, MarketData, ReviewItem } from '../shared/types';
 import { inChinaRange, signalConfirmationTime } from '../shared/review';
 import { formatNumber, formatTime } from './format';
@@ -9,21 +10,34 @@ function chinaDate(time: number): string {
   return new Date(time * 1000 + 8 * 3600000).toISOString().slice(0, 10);
 }
 
-/** 逐中国工作日对照收盘指标与实际操作，包括没有触发策略的成交和无操作日。 */
-export function DailyReview({ data, indicators, review, start, end, onSelect }: Props) {
-  const dates: string[] = [];
-  for (let cursor = Date.parse(`${start}T00:00:00+08:00`); cursor < Date.parse(`${end}T00:00:00+08:00`); cursor += 86400000) {
-    const date = new Date(cursor + 8 * 3600000);
-    if (date.getUTCDay() !== 0 && date.getUTCDay() !== 6) dates.push(date.toISOString().slice(0, 10));
-  }
+/** 逐中国工作日对照收盘指标与实际操作；参数为快照、指标、复盘范围与定位回调，返回逐日检查表。 */
+export const DailyReview = memo(function DailyReview({ data, indicators, review, start, end, onSelect }: Props) {
+  const dates = useMemo(() => {
+    const days: string[] = [];
+    for (let cursor = Date.parse(`${start}T00:00:00+08:00`); cursor < Date.parse(`${end}T00:00:00+08:00`); cursor += 86400000) {
+      const date = new Date(cursor + 8 * 3600000);
+      if (date.getUTCDay() !== 0 && date.getUTCDay() !== 6) days.push(date.toISOString().slice(0, 10));
+    }
+    return days;
+  }, [start, end]);
+  const candleIndices = useMemo(() => {
+    const remaining = new Set(dates); const indices = new Map<string, number>();
+    // 每个日期只取最后一根已确认柱；一次倒序扫描，避免逐日反复复制、遍历长历史和换算时区。
+    for (let index = data.candles.length - 1; index >= 0 && remaining.size; index--) {
+      const candle = data.candles[index];
+      if (!candle.confirmed) continue;
+      const date = chinaDate(signalConfirmationTime(candle.time, data.symbol, data.period));
+      if (remaining.delete(date)) indices.set(date, index);
+    }
+    return indices;
+  }, [data.candles, data.symbol, data.period, dates]);
   const executions = data.executions.filter((execution) => inChinaRange(execution.time, start, end));
   const matchedIds = new Set(review.flatMap((item) => item.execution ? [item.execution.id] : []));
   return <section className="review-panel daily-panel">
     <div className="section-header"><div><h2>逐日操作检查</h2><p>中国时间工作日 · 汇总当日确认的最后一根 K 线 · 保留没有信号的操作</p></div></div>
     <div className="table-scroll"><table><thead><tr><th>中国日期</th><th>收盘趋势 / 动量</th><th>波动 / 成交量</th><th>当日成交</th><th>复盘关注点</th></tr></thead><tbody>
       {dates.map((date) => {
-        const reverseIndex = [...data.candles].reverse().findIndex((candle) => candle.confirmed && chinaDate(signalConfirmationTime(candle.time, data.symbol, data.period)) === date);
-        const index = reverseIndex < 0 ? -1 : data.candles.length - 1 - reverseIndex;
+        const index = candleIndices.get(date) ?? -1;
         const candle = data.candles[index]; const point = indicators[index];
         const fills = executions.filter((execution) => chinaDate(execution.time) === date);
         const items = review.filter((item) => chinaDate(signalConfirmationTime(item.signal.time, data.symbol, data.period)) === date);
@@ -39,4 +53,4 @@ export function DailyReview({ data, indicators, review, start, end, onSelect }: 
     </tbody></table></div>
     <p className="method-note">日线按当地收盘的实际中国时间归组，因此美股周五收盘通常落在中国周六，按当前约定不计入本周。盘中分析使用 1 小时或 15 分钟周期。</p>
   </section>;
-}
+});

@@ -7,34 +7,30 @@ import { useLiveMarketData, useRealtimeMarket } from './useRealtimeMarket';
 import { RealtimeStatus } from './RealtimeStatus';
 import { LongbridgeLogin } from './LongbridgeLogin';
 import { OriginalChartLab } from './OriginalChartLab';
-import { MarketTimeframes, type ChartView } from './MarketTimeframes';
+import { MarketTimeframes } from './MarketTimeframes';
 import { IntradayView } from './IntradayView';
 import { useIntraday } from './useIntraday';
 import { WatchlistPanel } from './WatchlistPanel';
-import type { IntradaySession } from '../shared/intraday';
 import { PlanToolbar, StrategyWorkbench } from './StrategyWorkbench';
 import { PERIOD_LABELS } from '../shared/periods';
 import { ExecutionReview } from './ExecutionReview';
 import './plans.css';
 import './strategy.css';
 import { DailyReview } from './DailyReview';
-import { buildReview, getChinaWeekRange } from '../shared/review';
+import { buildReview } from '../shared/review';
 import { DEFAULT_CONFIG, type IndicatorConfig, type MarketData, type Period, type Security, type SourceMode, type Workspace } from '../shared/types';
 import { fetchMarket, fetchWorkspace } from './api';
 import type { ChartLayers, Oscillator } from './Chart';
 import { DataTable, ReviewPanel, SettingsDialog } from './Panels';
 import { ResearchSidebar } from './ResearchSidebar';
 import { EventCenter } from './EventCenter';
+import { useLocalSetting } from './local-settings';
+import { DEFAULT_WORKSPACE_SETTINGS, isWorkspaceSettings, presetRange, restoreWorkspaceSettings, type WorkspaceSettings } from './workspace-settings';
 
 const StockChart = lazy(() => import('./Chart').then((module) => ({ default: module.StockChart })));
 const PlanEditor = lazy(() => import('./PlanEditor').then((module) => ({ default: module.PlanEditor })));
-const INITIAL_SECURITY: Security = { symbol: 'NVDA.US', name: '英伟达', market: 'US', currency: 'USD' };
-
-/** 获取默认周区间；演示固定到标注的历史周，真实模式依据当前中国时间。 */
-function weekRange(source: SourceMode) {
-  const range = getChinaWeekRange(source === 'demo' ? new Date('2026-10-16T08:00:00Z') : new Date());
-  return { start: range.start.slice(0, 10), end: range.end.slice(0, 10) };
-}
+/** 获取默认周区间；参数为来源，返回当前适用的中国时间范围。 */
+function weekRange(source: SourceMode) { return presetRange(source, 'week'); }
 
 /** 页面级异步读取：取消过时响应；错误保留真实来源状态，绝不自动混入演示数据。 */
 function useWorkspace(source: SourceMode, refresh: number) {
@@ -64,16 +60,12 @@ function readConfig(): IndicatorConfig {
 
 /** 顶层工作台：共享证券、周期和中国时间复盘范围，统一驱动图表与执行对照。 */
 export default function App() {
-  const [source, setSource] = useState<SourceMode>('demo');
-  const [security, setSecurity] = useState<Security>(INITIAL_SECURITY);
-  const [period, setPeriod] = useState<Period>('day');
-  const [view, setView] = useState<ChartView>('candles'); const [session, setSession] = useState<IntradaySession>('regular');
-  const [range, setRange] = useState(() => weekRange('demo'));
-  const [preset, setPreset] = useState('week');
+  const [preferences, setPreferences, storageError] = useLocalSetting('market-lens-workspace-v1', DEFAULT_WORKSPACE_SETTINGS, isWorkspaceSettings, restoreWorkspaceSettings);
+  const { source, security, period, view, session, range, preset, layers, oscillator } = preferences;
+  /** 更新单个设置；参数为字段与新值，返回无，持久化仅在设置变化后执行。 */
+  const setPreference = <Key extends keyof WorkspaceSettings>(key: Key, value: WorkspaceSettings[Key]) => setPreferences(current => ({ ...current, [key]: value }));
   const [refresh, setRefresh] = useState(0);
   const [config, setConfig] = useState<IndicatorConfig>(readConfig);
-  const [layers, setLayers] = useState<ChartLayers>({ ma: false, sar: false, boll: false, signals: true, fills: true });
-  const [oscillator, setOscillator] = useState<Oscillator>('macd');
   const [selectedTime, setSelectedTime] = useState<number | null>(null);
   const [settings, setSettings] = useState(false);
   const [search, setSearch] = useState(false);
@@ -95,13 +87,13 @@ export default function App() {
   const liveQuote = live?.quote;
   const change = liveQuote ? liveQuote.previousClose ? (liveQuote.price / liveQuote.previousClose - 1) * 100 : null : latest && previous ? (latest.close / previous.close - 1) * 100 : null;
   const onSelect = useCallback((time: number) => setSelectedTime(time), []);
-  const changeSource = (next: SourceMode) => { setSource(next); setRange(weekRange(next)); setPreset('week'); setSelectedTime(null); };
-  const chooseSecurity = (next: Security) => { setSecurity(next); setSelectedTime(null); setSearch(false); };
+  const changeSource = (next: SourceMode) => { setPreferences(current => ({ ...current, source: next, range: weekRange(next), preset: 'week' })); setSelectedTime(null); };
+  const chooseSecurity = (next: Security) => { setPreference('security', next); setSelectedTime(null); setSearch(false); };
   const securities = workspaceState.workspace?.securities ?? [];
   const warnings = [...new Set([...(workspaceState.workspace?.warnings ?? []), ...(data?.warnings ?? [])])];
-  const timeframes = <MarketTimeframes view={view} session={session} period={period} onView={next => { setView(next); setSelectedTime(null); }} onSession={setSession} onPeriod={setPeriod} />;
-  const chartControls = <div className="layer-controls">{([['ma', `策略 MA ${chartConfig.fastMA} / ${chartConfig.slowMA}`], ['sar', 'SAR'], ['boll', 'BOLL'], ['signals', '策略信号'], ['fills', '实际成交']] as [keyof ChartLayers, string][]).map(([key, label]) => <label key={key}><input type="checkbox" checked={layers[key]} onChange={() => setLayers(current => ({ ...current, [key]: !current[key] }))} />{label}</label>)}
-    <label className="oscillator-select">副图<select aria-label="技术指标副图" value={oscillator} onChange={event => setOscillator(event.target.value as Oscillator)}><option value="macd">MACD</option><option value="rsi">RSI</option><option value="dmi">DMI</option></select></label></div>;
+  const timeframes = <MarketTimeframes view={view} session={session} period={period} onView={next => { setPreference('view', next); setSelectedTime(null); }} onSession={next => setPreference('session', next)} onPeriod={next => setPreference('period', next)} />;
+  const chartControls = <div className="layer-controls">{([['ma', `策略 MA ${chartConfig.fastMA} / ${chartConfig.slowMA}`], ['sar', 'SAR'], ['boll', 'BOLL'], ['signals', '策略信号'], ['fills', '实际成交']] as [keyof ChartLayers, string][]).map(([key, label]) => <label key={key}><input type="checkbox" checked={layers[key]} onChange={() => setPreferences(current => ({ ...current, layers: { ...current.layers, [key]: !current.layers[key] } }))} />{label}</label>)}
+    <label className="oscillator-select">副图<select aria-label="技术指标副图" value={oscillator} onChange={event => setPreference('oscillator', event.target.value as Oscillator)}><option value="macd">MACD</option><option value="rsi">RSI</option><option value="dmi">DMI</option></select></label></div>;
   return <div className="app-shell">
     <a className="skip-link" href="#analysis">跳转到行情图表</a>
     <WorkspaceRail onSettings={() => setSettings(true)} />
@@ -110,6 +102,7 @@ export default function App() {
       <main>
         <WorkspaceTitle source={source} onSource={changeSource}><LongbridgeLogin /></WorkspaceTitle>
         {source === 'demo' && <div className="demo-banner"><span className="status-dot" /><strong>演示工作区</strong><span>行情、持仓与成交均为合成数据，不代表你的账户。切换数据源可读取本机 Longbridge。</span></div>}
+        {storageError && <p className="error-banner" role="status">{storageError}</p>}
         {(error || workspaceState.error || strategy.error) && <div className="error-banner" role="alert"><strong>读取状态</strong><span>{error || workspaceState.error || strategy.error}</span><button className="button" onClick={refreshMarket}>重试</button></div>}
         <div className="workspace-grid">
           <WatchlistPanel workspace={workspaceState.workspace} selected={security.symbol} loading={workspaceState.loading} demo={source === 'demo'} onSearch={() => setSearch(true)} onSelect={chooseSecurity} />
@@ -119,9 +112,9 @@ export default function App() {
               <EventCenter source={source} scope="security" symbol={security.symbol} /><OriginalChartLab /><button className="button compact" onClick={() => setSettings(true)}><Settings2 size={14} />策略参数</button><button className="icon-button" aria-label="刷新行情" disabled={loading || workspaceState.loading} onClick={() => setRefresh((value) => value + 1)}>{loading ? <LoaderCircle size={16} className="spinner" /> : <RefreshCw size={16} />}</button></div>
             {source === 'longbridge' && <RealtimeStatus live={live} symbol={security.symbol} period={period} error={syncError} intraday={view !== 'candles'} intradaySync={intradayState.sync} />}
             {view !== 'candles' ? <IntradayView key={`${source}:${security.symbol}:${session}:${view}:${refresh}`} source={source} session={session} days={view === 'five-day' ? 5 : 1} state={intradayState} footer={timeframes} /> : <>
-            <RangeControls range={range} preset={preset} onChange={(next, nextPreset) => { setRange(next); setPreset(nextPreset); setSelectedTime(null); }} source={source} />
+            <RangeControls range={range} preset={preset} onChange={(next, nextPreset) => { setPreferences(current => ({ ...current, range: next, preset: nextPreset })); setSelectedTime(null); }} source={source} />
             <PlanToolbar plan={strategy.plan} saved={Boolean(strategy.saved)} picking={strategy.picking} onPick={strategy.setPicking} onEdit={strategy.edit} />
-            {data ? <div className={loading ? 'chart-loading' : ''}><Suspense fallback={<div className="chart-placeholder">加载交互图表…</div>}><StockChart candles={data.candles} indicators={indicators} signals={signals} executions={data.executions} symbol={security.symbol} period={period} layers={layers} oscillator={oscillator} selectedTime={selectedTime} costPrice={position?.costPrice} onSelect={onSelect} plan={strategy.plan} backtest={strategy.result} pickingPrice={Boolean(strategy.picking)} onPickPrice={strategy.pickPrice} footer={timeframes} controls={chartControls} /></Suspense></div>
+            {data ? <div className={loading ? 'chart-loading' : ''}><Suspense fallback={<div className="chart-placeholder">加载交互图表…</div>}><StockChart source={source} candles={data.candles} indicators={indicators} signals={signals} executions={data.executions} symbol={security.symbol} period={period} layers={layers} oscillator={oscillator} selectedTime={selectedTime} costPrice={position?.costPrice} onSelect={onSelect} plan={strategy.plan} backtest={strategy.result} pickingPrice={Boolean(strategy.picking)} onPickPrice={strategy.pickPrice} footer={timeframes} controls={chartControls} /></Suspense></div>
               : <><div className="chart-placeholder">{loading ? '正在读取行情与历史成交…' : '选择数据源并刷新以加载图表。'}</div>{timeframes}</>}
             <div className="chart-legend"><span>主图 MA 5 / 10 / 20 / 50 · 策略均线在指标栏单独开启</span><span>↑↓ 收盘触发</span><span>■ 模拟成交</span><span>● 实际成交</span></div>
             <div className="chart-status"><span>{data ? `${data.candles.length} 根 · ${source === 'demo' ? '合成快照' : 'Longbridge 快照'}` : '等待数据'}</span><span>横轴：交易所时间 · 复盘：北京时间</span></div></>}
@@ -163,13 +156,13 @@ function useMarket(source: SourceMode, symbol: string, period: Period, range: { 
 }
 
 /** 日期控件：预设自然周或近30天，自定义结束日明确为不含，错误阻止范围应用。 */
-function RangeControls({ range, preset, onChange, source }: { range: { start: string; end: string }; preset: string; onChange: (range: { start: string; end: string }, preset: string) => void; source: SourceMode }) {
+function RangeControls({ range, preset, onChange, source }: { range: { start: string; end: string }; preset: WorkspaceSettings['preset']; onChange: (range: { start: string; end: string }, preset: WorkspaceSettings['preset']) => void; source: SourceMode }) {
   const [custom, setCustom] = useState(false); const [error, setError] = useState('');
   return <div className="range-controls"><span>复盘范围</span><select aria-label="复盘时间范围" value={preset} onChange={(event) => {
     const value = event.target.value;
     if (value === 'custom') { setCustom(true); return; }
     const week = weekRange(source);
-    onChange(value === 'week' ? week : { start: new Date(Date.parse(week.end) - 30 * 86400000).toISOString().slice(0, 10), end: week.end }, value);
+    onChange(value === 'week' ? week : { start: new Date(Date.parse(week.end) - 30 * 86400000).toISOString().slice(0, 10), end: week.end }, value === 'week' ? 'week' : 'month');
   }}><option value="week">本周（中国时间）</option><option value="month">近 30 天</option><option value="custom">自定义区间</option></select><span className="range-label">{range.start.slice(5)} — {range.end.slice(5)} 不含</span>
     {custom && <form className="custom-range" onSubmit={(event) => {
       event.preventDefault(); const values = new FormData(event.currentTarget); const start = String(values.get('start')); const end = String(values.get('end'));

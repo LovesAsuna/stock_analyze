@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { ChartTools } from './ChartTools';
 import { useChartPreferences } from './chart-preferences';
+import { isBoolean, useLocalSetting } from './local-settings';
+import { bindViewportPersistence } from './chart-viewport-binding';
 import { useChartFullscreen } from './useChartFullscreen';
 import { chartColor as color, applyChartPreferences, performChartAction } from './chart-runtime';
 import { calculateChartStudies, type ChartStudyPoint } from './chart-study-data';
@@ -12,7 +14,7 @@ import { WaveWindowOverlay, WaveWindowControls } from './WaveWindow';
 import './chart-terminal.css';
 import { createChart, CandlestickSeries, LineSeries, HistogramSeries, createSeriesMarkers, ColorType, LineStyle,
   type IChartApi, type ISeriesApi, type ISeriesMarkersPluginApi, type UTCTimestamp, type SeriesMarker, type Time } from 'lightweight-charts';
-import type { Candle, Execution, IndicatorPoint, Period, Signal } from '../shared/types';
+import type { Candle, Execution, IndicatorPoint, Period, Signal, SourceMode } from '../shared/types';
 import { formatTime } from './format';
 import type { ChartPreferences } from './chart-preferences';
 import { barOpenTime, signalConfirmationTime } from '../shared/review';
@@ -25,7 +27,7 @@ export interface ChartLayers { ma: boolean; sar: boolean; boll: boolean; signals
 export type Oscillator = 'macd' | 'rsi' | 'dmi';
 interface Props {
   candles: Candle[]; indicators: IndicatorPoint[]; signals: Signal[]; executions: Execution[];
-  symbol: string; period: Period; layers: ChartLayers; oscillator: Oscillator;
+  source: SourceMode; symbol: string; period: Period; layers: ChartLayers; oscillator: Oscillator;
   selectedTime: number | null; costPrice?: number; onSelect: (time: number) => void;
   plan?: TradingPlan; backtest?: BacktestResult; pickingPrice?: boolean; onPickPrice?: (price: number) => void;
   footer?: ReactNode; controls?: ReactNode;
@@ -145,18 +147,22 @@ export function StockChart(props: Props) {
   const host = useRef<HTMLDivElement>(null);
   const { preferences, setPreferences, error } = useChartPreferences();
   const screen = useChartFullscreen(host);
-  const [indicatorsOpen, setIndicatorsOpen] = useState(false);
-  const [showAverages, setShowAverages] = useState(true);
+  const [indicatorsOpen, setIndicatorsOpen, controlsError] = useLocalSetting('market-lens-chart-controls-v1', false, isBoolean);
+  const [showAverages, setShowAverages, averagesError] = useLocalSetting('market-lens-chart-averages-v1', true, isBoolean);
+  const [viewportError, setViewportError] = useState('');
+  const viewport = useRef<ReturnType<typeof bindViewportPersistence> | null>(null);
   const studies = useMemo(() => calculateChartStudies(props.candles), [props.candles]);
   const state = useRef<ChartState | null>(null);
-  const wave = useWaveWindow(props.candles, `${props.symbol}-${props.period}`, state);
+  const wave = useWaveWindow(props.candles, `${props.source}:${props.symbol}:${props.period}`, state);
   const latestProps = useRef(props); latestProps.current = props;
-  const datasetKey = useRef('');
   const selectionKey = useRef('');
   const [hovered, setHovered] = useState<Candle | null>(null);
   useEffect(() => {
     if (!container.current) return;
     const current = initialize(container.current); state.current = current;
+    // 每个新实例独立恢复持久视野，兼容开发模式重放挂载。
+    selectionKey.current = '';
+    const persistence = bindViewportPersistence(current.chart, container.current, setViewportError); viewport.current = persistence;
     const releaseWheel = bindChartWheel(container.current, current.chart);
     current.chart.subscribeCrosshairMove((event) => {
       setHovered(latestProps.current.candles.find((candle) => candle.time === event.time) ?? null);
@@ -168,18 +174,14 @@ export function StockChart(props: Props) {
         if (price != null) latest.onPickPrice?.(price);
       } else if (typeof event.time === 'number') latest.onSelect(event.time);
     });
-    return () => { releaseWheel(); current.chart.remove(); state.current = null; };
+    return () => { persistence.destroy(); viewport.current = null; releaseWheel(); current.chart.remove(); state.current = null; };
   }, []);
   useEffect(() => {
     if (!state.current) return;
+    viewport.current?.beforeUpdate(`${props.source}:${props.symbol}:${props.period}`, props.candles);
     updateChart(state.current, props, studies, showAverages);
-    // 实时追加K线不得把用户正在查看的历史位置强制跳回最新柱。
-    const key = `${props.symbol}-${props.period}`;
-    if (datasetKey.current !== key) {
-      state.current.chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, props.candles.length - 100), to: props.candles.length + 7 });
-      datasetKey.current = key;
-    }
-  }, [props.candles, props.indicators, props.layers, props.oscillator, props.signals, props.executions, props.symbol, props.period, props.backtest, studies, showAverages]);
+    viewport.current?.afterUpdate(props.period);
+  }, [props.candles, props.indicators, props.layers, props.oscillator, props.signals, props.executions, props.source, props.symbol, props.period, props.backtest, studies, showAverages]);
   useEffect(() => { if (state.current) updateElliottOverlay(state.current.waves, wave.analysis); }, [wave.analysis]);
   useChartAppearance(state, preferences);
   useEffect(() => {
@@ -220,8 +222,8 @@ export function StockChart(props: Props) {
   const selected = props.candles.find((candle) => candle.time === (hovered?.time ?? props.selectedTime)) ?? props.candles.at(-1);
   const hoveredPoint = props.indicators.find((point) => point.time === selected?.time);
   return <div ref={host} className="chart-terminal">
-    <ChartTools preferences={preferences} onPreferences={setPreferences} onAction={action => { if (state.current) performChartAction(state.current.chart, action); }}
-      indicatorsOpen={indicatorsOpen} onIndicators={() => setIndicatorsOpen(value => !value)} fullscreen={screen.fullscreen} onFullscreen={screen.toggle} error={screen.error || error} />
+    <ChartTools preferences={preferences} onPreferences={setPreferences} onAction={action => { if (state.current) { performChartAction(state.current.chart, action); viewport.current?.capture(); } }}
+      indicatorsOpen={indicatorsOpen} onIndicators={() => setIndicatorsOpen(value => !value)} fullscreen={screen.fullscreen} onFullscreen={screen.toggle} error={screen.error || error || controlsError || averagesError || wave.error || viewportError} />
     {indicatorsOpen && <div className="study-controls"><label><input type="checkbox" checked={showAverages} onChange={event => setShowAverages(event.target.checked)} />MA 5 / 10 / 20 / 50（图表）</label>
       <label><input type="checkbox" checked={wave.enabled} onChange={event => wave.toggle(event.target.checked)} />自动埃略特波浪</label>
       {wave.enabled && <label>波浪灵敏度<select aria-label="波浪灵敏度" value={wave.radius} onChange={event => wave.setRadius(Number(event.target.value))}>

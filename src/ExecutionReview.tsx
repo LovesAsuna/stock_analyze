@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from 'react';
+import { memo, useMemo, useState, type FormEvent } from 'react';
 import type { MarketData, Signal } from '../shared/types';
 import { buildExecutionReview, type ExecutionReviewResult, type LedgerEntry, type OpeningPosition } from '../shared/execution-review';
 import { barOpenTime, signalConfirmationTime } from '../shared/review';
@@ -23,10 +23,10 @@ const SIGNAL_LABELS = {
  * @param props 行情、父组件全部信号及原始 K 线时间定位回调。
  * @returns 可折叠期初表单与仓位/信号核查界面；不读写持久存储或账户接口。
  */
-export function ExecutionReview({ data, signals, onSelect }: ExecutionReviewProps) {
+export const ExecutionReview = memo(function ExecutionReview({ data, signals, onSelect }: ExecutionReviewProps) {
   const scope = JSON.stringify([data.source, data.symbol, data.period, data.executionRange?.start, data.executionRange?.end]);
   return <ExecutionReviewContent key={scope} data={data} signals={signals} onSelect={onSelect} />;
-}
+});
 
 /**
  * 校验手工输入的非负数量或正单位成本，空成本允许 null，空数量不能暗示空仓。

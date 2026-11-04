@@ -1,5 +1,5 @@
 import { ArrowDownRight, ArrowUpRight, Check, CircleHelp, Download, SlidersHorizontal, X } from 'lucide-react';
-import { useEffect, useRef } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { DEFAULT_CONFIG, type Candle, type IndicatorConfig, type IndicatorPoint, type MarketData, type Period, type Position, type ReviewItem, type Security, type Signal } from '../shared/types';
 import { signalConfirmationTime } from '../shared/review';
 import type { TradingPlan } from '../shared/strategy';
@@ -73,7 +73,7 @@ function exportReview(props: ReviewProps): void {
 }
 
 /** 按已选中国时间范围对照信号与成交，列出潜在遗漏及其后续价格路径。 */
-export function ReviewPanel(props: ReviewProps) {
+export const ReviewPanel = memo(function ReviewPanel(props: ReviewProps) {
   const counts = { matched: 0, unmatched: 0, unknown: 0, pending: 0 };
   props.items.forEach((item) => counts[item.state]++);
   return <section className="review-panel" id="review">
@@ -94,17 +94,20 @@ export function ReviewPanel(props: ReviewProps) {
     </div>
     <p className="method-note">“未见同向成交”是待复核的遗漏候选，需结合当时仓位、可用资金和交易计划判断。后续价格变化为事后统计，不计费用与滑点，不直接作为遗漏损失。</p>
   </section>;
-}
+});
 
-/** 用表格提供无需鼠标悬浮的完整 OHLCV 和指标读取路径。 */
-export function DataTable({ candles, points, symbol, period }: { candles: Candle[]; points: IndicatorPoint[]; symbol: string; period: Period }) {
-  return <details className="data-details"><summary>行情与指标数据表（最近 60 根）</summary><div className="table-scroll"><table>
+/** 按需提供完整 OHLCV 和指标读取路径；参数为柱、指标、证券及周期，返回可折叠数据表。 */
+export const DataTable = memo(function DataTable({ candles, points, symbol, period }: { candles: Candle[]; points: IndicatorPoint[]; symbol: string; period: Period }) {
+  const [expanded, setExpanded] = useState(false);
+  // 折叠时不创建隐藏行或格式化时间；展开时用索引避免为每行扫描整份指标历史。
+  const pointByTime = expanded ? new Map(points.map(point => [point.time, point])) : null;
+  return <details className="data-details" onToggle={event => setExpanded(event.currentTarget.open)}><summary>行情与指标数据表（最近 60 根）</summary>{expanded && <div className="table-scroll"><table>
     <thead><tr>{['交易所时间', '开', '高', '低', '收', '量', 'MACD柱', 'RSI', 'ADX', 'SAR'].map((title) => <th key={title}>{title}</th>)}</tr></thead>
-    <tbody>{candles.slice(-60).reverse().map((candle) => { const point = points.find((item) => item.time === candle.time); return <tr key={candle.time}>
+    <tbody>{candles.slice(-60).reverse().map((candle) => { const point = pointByTime?.get(candle.time); return <tr key={candle.time}>
       <td>{formatTime(candle.time, symbol, period)}</td>{[candle.open, candle.high, candle.low, candle.close, candle.volume, point?.histogram, point?.rsi, point?.adx, point?.sar].map((value, index) => <td key={index}>{formatNumber(value, index === 4 ? 0 : 2)}</td>)}
     </tr>; })}</tbody>
-  </table></div></details>;
-}
+  </table></div>}</details>;
+});
 
 interface SettingsProps { open: boolean; onClose: () => void; config: IndicatorConfig; onSave: (config: IndicatorConfig) => void }
 

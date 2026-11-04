@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { memo, useEffect, useId, useRef, useState } from 'react';
 import { CalendarDays, ExternalLink, Globe2, Newspaper, RefreshCw, X } from 'lucide-react';
 import type { EventData, EventKind, EventScope, MarketEvent } from '../shared/events';
 import { eventLink } from '../shared/events';
@@ -7,15 +7,27 @@ import { fetchEvents } from './api';
 import './events.css';
 import { EventCalendar } from './EventCalendar';
 import { eventDay } from './event-calendar';
+import { useLocalSetting } from './local-settings';
+
+type EventFilter = 'all' | EventKind;
+/** 校验全局分类。参数：未知值；返回：全局范围支持的分类类型。 */
+function isGlobalFilter(value: unknown): value is EventFilter { return value === 'all' || value === 'macro' || value === 'news'; }
+/** 校验个股分类。参数：未知值；返回：个股范围支持的分类类型。 */
+function isSecurityFilter(value: unknown): value is EventFilter { return value === 'all' || value === 'earnings' || value === 'filing' || value === 'news'; }
 
 const KIND_LABELS: Record<EventKind, string> = { macro: '宏观日历', earnings: '财报', filing: '公告', news: '新闻' };
+// 所有事件统一使用北京时间，复用格式器以避免逐条构建地区与时区规则。
+const EVENT_TIME_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: 'Asia/Shanghai', year: 'numeric', month: 'numeric', day: 'numeric',
+  hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+});
 
 /** 保留日期精度，明确使用北京时间展示有时刻的事件。参数：ISO时间与日期标志；返回：可读时间。 */
 function eventTime(value: string | null, dateOnly = false): string {
   if (!value) return '时间未提供';
   if (dateOnly) return `${value.slice(0, 10)} · 时刻未提供`;
   const date = new Date(value);
-  return Number.isFinite(date.getTime()) ? `${date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })} 北京时间` : '时间未提供';
+  return Number.isFinite(date.getTime()) ? `${EVENT_TIME_FORMATTER.format(date)} 北京时间` : '时间未提供';
 }
 
 /** 单事件保留来源、发表/计划时间及原文入口，不渲染上游HTML。参数：标准事件；返回：具名卡片。 */
@@ -66,19 +78,21 @@ function EventList({ data, filter, selected }: { data: EventData; filter: 'all' 
 /** 事件抽屉内容独立挂载以取消请求；参数：来源、范围及证券；返回：过滤、重试及事件列表。 */
 function EventContent({ source, scope, symbol }: { source: SourceMode; scope: EventScope; symbol?: string }) {
   const [refresh, setRefresh] = useState(0);
-  const [filter, setFilter] = useState<'all' | EventKind>('all');
+  const [filter, setFilter, storageError] = useLocalSetting(`market-lens-event-filter-${scope}-v1`, 'all', scope === 'global' ? isGlobalFilter : isSecurityFilter);
   const [selected, setSelected] = useState<string | null>(null);
   const { data, error, loading } = useEvents(source, scope, symbol, refresh);
   const kinds: ('all' | EventKind)[] = scope === 'global' ? ['all', 'macro', 'news'] : ['all', 'earnings', 'filing', 'news'];
   return <div className="event-center-content" aria-busy={loading}>
     <div className="event-center-toolbar"><div role="group" aria-label="事件分类">{kinds.map(kind => <button key={kind} type="button" aria-pressed={filter === kind} onClick={() => setFilter(kind)}>{kind === 'all' ? '全部' : KIND_LABELS[kind]}</button>)}</div>
       <button className="icon-button" type="button" aria-label="刷新事件" disabled={loading} onClick={() => setRefresh(value => value + 1)}><RefreshCw size={16} aria-hidden="true" /></button></div>
+    {storageError && <p className="form-error" role="status">{storageError}</p>}
     {loading && <p className="event-center-state" role="status">正在读取{scope === 'global' ? '宏观日历和财经新闻' : '财报、公告和证券新闻'}…</p>}
     {error && <div className="event-center-state" role="alert"><p>{error}</p><button className="button" onClick={() => setRefresh(value => value + 1)}>重试事件</button></div>}
     {data && <>
-      <p className="event-center-window">{data.source === 'demo' ? '合成演示 · 非真实事件' : 'Longbridge 公开资讯'} · {data.window.start} 至 {data.window.end}<br />获取于 {eventTime(data.fetchedAt)}</p>
+      <p className="event-center-window">{data.source === 'demo' ? '合成演示 · 非真实事件' : scope === 'global' ? '多渠道公开资讯与官方日程' : '多渠道个股资讯与财报日历'} · {data.window.start} 至 {data.window.end}<br />获取于 {eventTime(data.fetchedAt)}</p>
       <EventCalendar data={data} filter={filter} selected={selected} onSelect={setSelected} />
-      {data.warnings.length > 0 && <details className="event-center-warnings" open><summary>数据范围与提示（{data.warnings.length}）</summary><ul>{data.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul></details>}
+      {(data.warnings.length > 0 || Boolean(data.sources?.length)) && <details className="event-center-warnings" open><summary>数据范围与提示（{data.warnings.length}）</summary><ul>{data.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul>
+        {data.sources && <ul aria-label="事件渠道状态">{data.sources.map(channel => <li key={channel.label}>{channel.label}：{channel.state === 'ok' ? `已读取，窗口内 ${channel.count} 条` : '读取失败，当前结果未包含此渠道'}</li>)}</ul>}</details>}
       <EventList data={data} filter={filter} selected={selected} />
     </>}
   </div>;
@@ -89,7 +103,8 @@ function EventContent({ source, scope, symbol }: { source: SourceMode; scope: Ev
  * @param props 数据来源、事件范围及个股证券代码。
  * @returns 入口按钮与按需加载的右侧事件抽屉。
  */
-export function EventCenter({ source, scope, symbol }: { source: SourceMode; scope: EventScope; symbol?: string }) {
+// 事件只依赖来源、范围和证券；实时报价不能驱动整份新闻列表与月历重算。
+export const EventCenter = memo(function EventCenter({ source, scope, symbol }: { source: SourceMode; scope: EventScope; symbol?: string }) {
   const [open, setOpen] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -109,4 +124,4 @@ export function EventCenter({ source, scope, symbol }: { source: SourceMode; sco
       {open && <EventContent key={`${source}:${scope}:${symbol ?? ''}`} source={source} scope={scope} symbol={symbol} />}
     </dialog>
   </>;
-}
+});
